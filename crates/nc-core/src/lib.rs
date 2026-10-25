@@ -3,18 +3,27 @@
 //! World space is y-down, origin top-left, 1 unit = 1 logical px at 100% zoom (docs/PLAN.md §2).
 
 pub mod actions;
+pub mod animation;
 pub mod command;
 pub mod document;
 pub mod element;
+pub mod hit;
+pub mod input;
 pub mod scene;
+pub mod schedule;
+pub mod tools;
 
 pub use actions::{Action, Shortcut};
+pub use animation::ViewAnimation;
 pub use command::{Command, CommandError, History, Session};
 pub use document::{Document, Segment};
 pub use element::{
     Element, ElementId, ElementKind, RecognizedShape, Shape, ShapeKind, ShapeType, Stroke,
 };
+pub use input::Smoother;
 pub use kurbo::Rect;
+pub use schedule::FrameScheduler;
+pub use tools::{Tool, Tools};
 
 use glam::Vec2;
 

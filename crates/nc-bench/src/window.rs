@@ -1,11 +1,14 @@
-//! Raw winit 0.30 host: S2k under a scripted pan/zoom or live-draw run, fullscreen on the current output.
-//! Every frame records CPU time, swapchain acquire wait and (via `wp_presentation`) when it hit the screen.
+//! Raw winit 0.30 host: S2k fullscreen under a scripted pan/zoom, a synthetic 1 kHz pen, or real pointer
+//! input. Every frame records CPU time, swapchain acquire wait and (via `wp_presentation`) when it hit
+//! the screen. Frames can start at a fixed delay after the frame callback, or on the same adaptive
+//! schedule the app uses (`nc_core::FrameScheduler`).
 
 use glam::Vec2;
 use nc_bench::stats::Summary;
-use nc_bench::wl::SideChannel;
-use nc_core::{Command, Document, Element, Stroke, Viewport, scene};
-use nc_render::Renderer;
+use nc_core::{Command, Document, Element, FrameScheduler, Stroke, Viewport, scene};
+use nc_render::{LiveStroke, Renderer};
+use nc_wayland::{Presented, SideChannel, mono_ns};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -19,14 +22,26 @@ pub enum Scenario {
     PanZoom,
     /// Fixed view, a 1 kHz synthetic pen appending to a live stroke on top of S2k.
     Draw,
+    /// Event-driven like the app: a live stroke follows the real pointer over S2k at 100 %. Measures
+    /// each motion event's compositor timestamp to the scanout of the first frame that includes it.
+    Input,
     /// No rendering load: log what the tablet-v2 side channel and winit pointer events receive.
     Tablet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Latch {
+    /// Start drawing this long after the frame callback (the bench blocks; Phase 2 sweep).
+    Fixed(Duration),
+    /// The app's adaptive schedule.
+    Adaptive,
 }
 
 pub struct Config {
     pub scenario: Scenario,
     pub present_mode: wgpu::PresentMode,
     pub secs: f64,
+    pub latch: Latch,
 }
 
 const WARMUP: Duration = Duration::from_secs(1);
@@ -45,20 +60,31 @@ struct FrameRec {
     start_ns: u64,
     acquire_ms: f64,
     cpu_ms: f64,
+    on_schedule: bool,
 }
 
 struct Bench {
     cfg: Config,
     gpu: Option<Gpu>,
     wl: Option<SideChannel>,
+    presented: HashMap<u64, Presented>,
     doc: Document,
-    /// The synthetic pen's stroke, committed as a command every 2 s like the app does on pen-up.
+    /// The pen's stroke: committed as a command every 2 s (Draw), or following the pointer (Input).
     live: Option<Stroke>,
+    live_serial: u64,
     viewport: Viewport,
     started: Option<Instant>,
     frames: Vec<FrameRec>,
     pen_samples: u64,
     winit_pointer_events: u64,
+    scheduler: FrameScheduler,
+    draw_at: Option<u64>,
+    /// Input scenario: compositor timestamps (ms) of motion not yet drawn, and (event ms, frame) pairs.
+    pending_motion: Vec<u32>,
+    motion_frames: Vec<(u32, u64)>,
+    /// Receipt time minus compositor timestamp, ms: checks both clocks are CLOCK_MONOTONIC.
+    motion_delivery_ms: Vec<f64>,
+    tablet: (usize, Vec<nc_wayland::ToolFrame>),
 }
 
 pub fn run(cfg: Config) {
@@ -66,14 +92,22 @@ pub fn run(cfg: Config) {
     let mut bench = Bench {
         doc: scene::s2k(1),
         live: None,
+        live_serial: 0,
         cfg,
         gpu: None,
         wl: None,
+        presented: HashMap::new(),
         viewport: Viewport::default(),
         started: None,
         frames: Vec::new(),
         pen_samples: 0,
         winit_pointer_events: 0,
+        scheduler: FrameScheduler::default(),
+        draw_at: None,
+        pending_motion: Vec::new(),
+        motion_frames: Vec::new(),
+        motion_delivery_ms: Vec::new(),
+        tablet: (0, Vec::new()),
     };
     event_loop.run_app(&mut bench).expect("run app");
 }
@@ -136,10 +170,14 @@ impl Gpu {
 }
 
 impl Bench {
+    fn continuous(&self) -> bool {
+        matches!(self.cfg.scenario, Scenario::PanZoom | Scenario::Draw)
+    }
+
     fn script(&mut self, t: f64, size: Vec2) {
+        let center = scene::S2K_EXTENT * 0.5;
         match self.cfg.scenario {
             Scenario::PanZoom => {
-                let center = scene::S2K_EXTENT * 0.5;
                 let angle = (t / 10.0 * std::f64::consts::TAU) as f32;
                 let focus = center + Vec2::new(angle.cos(), angle.sin()) * 1_500.0;
                 let scale = (4f32.ln() * (t / 6.0 * std::f64::consts::TAU).sin() as f32).exp();
@@ -149,7 +187,6 @@ impl Bench {
                 };
             }
             Scenario::Draw => {
-                let center = scene::S2K_EXTENT * 0.5;
                 self.viewport = Viewport {
                     scale: 1.0,
                     offset: size * 0.5 - center,
@@ -164,20 +201,63 @@ impl Bench {
                             (s * 3.3).sin() as f32 * 250.0,
                         );
                     if self.pen_samples.is_multiple_of(2_000) {
-                        if let Some(done) = self.live.take() {
-                            Command::append(Element::stroke(done))
-                                .apply(&mut self.doc)
-                                .expect("append always applies");
-                        }
+                        self.commit_live();
                         self.live = Some(Stroke::new(p, 2.5, [0.9, 0.6, 0.3, 1.0]));
+                        self.live_serial += 1;
                     } else if let Some(stroke) = &mut self.live {
                         stroke.push(p);
                     }
                     self.pen_samples += 1;
                 }
             }
+            Scenario::Input => {
+                self.viewport = Viewport {
+                    scale: 1.0,
+                    offset: size * 0.5 - center,
+                };
+            }
             Scenario::Tablet => {}
         }
+    }
+
+    fn commit_live(&mut self) {
+        if let Some(done) = self.live.take() {
+            Command::append(Element::stroke(done))
+                .apply(&mut self.doc)
+                .expect("append always applies");
+        }
+    }
+
+    fn dispatch(&mut self) {
+        let Some(wl) = &mut self.wl else { return };
+        wl.dispatch();
+        let (presented, scheduler) = (&mut self.presented, &mut self.scheduler);
+        let frames = &self.frames;
+        wl.drain_presented(|id, p| {
+            presented.insert(id, p);
+            if let (
+                Some(f),
+                Presented::Shown {
+                    at_ns, refresh_ns, ..
+                },
+            ) = (frames.get(id as usize), p)
+            {
+                scheduler.on_presented(f.start_ns, at_ns, refresh_ns, f.on_schedule);
+            }
+        });
+        let now_ms = mono_ns() / 1_000_000;
+        let (pending, delivery) = (&mut self.pending_motion, &mut self.motion_delivery_ms);
+        wl.drain_pointer_times(|t| {
+            pending.push(t);
+            delivery.push(now_ms.wrapping_sub(t as u64) as u32 as f64);
+        });
+        let tablet = &mut self.tablet;
+        wl.drain_tool_frames(|f| {
+            tablet.0 += 1;
+            if tablet.1.len() < 5 {
+                tablet.1.push(f);
+            }
+        });
     }
 
     fn report(&mut self) {
@@ -188,11 +268,13 @@ impl Bench {
                 wl.roundtrip();
             }
         }
+        self.dispatch();
         let gpu = self.gpu.as_ref().unwrap();
         println!(
-            "scenario {:?}, present {:?}, {}x{} px, scale factor {}",
+            "scenario {:?}, present {:?}, latch {:?}, {}x{} px, scale factor {}",
             self.cfg.scenario,
             self.cfg.present_mode,
+            self.cfg.latch,
             gpu.config.width,
             gpu.config.height,
             gpu.window.scale_factor()
@@ -204,7 +286,10 @@ impl Bench {
                 wl.is_some_and(|w| w.has_tablet_manager())
             );
             if let Some(w) = wl {
-                println!("tablet log: {:#?}", w.state.tablet);
+                println!(
+                    "tablets {:?}, pads {}, tool frames {} (first: {:?})",
+                    w.state.tablets, w.state.pads, self.tablet.0, self.tablet.1
+                );
             }
             println!(
                 "winit 0.30 pointer events (CursorMoved/MouseInput): {}",
@@ -220,20 +305,45 @@ impl Bench {
             self.frames.len(),
             self.frames.len() as f64 / secs
         );
-        println!(
-            "cpu per frame (script + acquire + encode + submit + present): {}",
-            Summary::of(&cpu).unwrap()
-        );
-        println!(
-            "  of which swapchain acquire wait:                          {}",
-            Summary::of(&acquire).unwrap()
-        );
+        if let (Some(c), Some(a)) = (Summary::of(&cpu), Summary::of(&acquire)) {
+            println!("cpu per frame (script + acquire + encode + submit + present): {c}");
+            println!("  of which swapchain acquire wait:                          {a}");
+        }
+        if self.cfg.latch == Latch::Adaptive {
+            println!(
+                "adaptive latch phase at the end: {:.2} ms after vblank",
+                self.scheduler.phase_ns() as f64 / 1e6
+            );
+        }
         let Some(wl) = &self.wl else {
             println!("no wp_presentation: scanout timing unavailable");
             return;
         };
         let starts: Vec<u64> = self.frames.iter().map(|f| f.start_ns).collect();
-        wl.print_scanout(&starts);
+        nc_bench::print_scanout(wl.state.clock_id, &self.presented, &starts);
+        if self.cfg.scenario == Scenario::Input {
+            let latency: Vec<f64> = self
+                .motion_frames
+                .iter()
+                .filter_map(|(t, frame)| match self.presented.get(frame) {
+                    Some(Presented::Shown { at_ns, .. }) => {
+                        Some(at_ns.saturating_sub(*t as u64 * 1_000_000) as f64 / 1e6)
+                    }
+                    _ => None,
+                })
+                .collect();
+            println!(
+                "winit CursorMoved/MouseInput events: {}",
+                self.winit_pointer_events
+            );
+            if let Some(d) = Summary::of(&self.motion_delivery_ms) {
+                println!("pointer event delivery (receipt − compositor timestamp): {d}");
+            }
+            match Summary::of(&latency) {
+                Some(s) => println!("pointer motion event → scanout of its first frame: {s}"),
+                None => println!("no pointer motion recorded: move the pointer over the window"),
+            }
+        }
     }
 }
 
@@ -241,7 +351,7 @@ impl ApplicationHandler for Bench {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_none() {
             let gpu = Gpu::new(event_loop, self.cfg.present_mode);
-            self.wl = SideChannel::new(gpu.window.as_ref());
+            self.wl = SideChannel::new(gpu.window.as_ref(), self.cfg.scenario == Scenario::Input);
             println!(
                 "wayland side channel: {}, wp_presentation: {}",
                 self.wl.is_some(),
@@ -250,34 +360,69 @@ impl ApplicationHandler for Bench {
             gpu.window.request_redraw();
             self.gpu = Some(gpu);
         }
-        if self.cfg.scenario == Scenario::Tablet {
+        if !self.continuous() {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_secs_f64(self.cfg.secs),
+                Instant::now() + WARMUP + Duration::from_secs_f64(self.cfg.secs),
             ));
             self.started.get_or_insert_with(Instant::now);
         }
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
-        if self.cfg.scenario == Scenario::Tablet
+        if !self.continuous()
             && matches!(cause, StartCause::ResumeTimeReached { .. })
+            && self
+                .started
+                .is_some_and(|s| s.elapsed() >= WARMUP + Duration::from_secs_f64(self.cfg.secs))
         {
             self.finish(event_loop);
         }
     }
 
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        if let Some(wl) = &mut self.wl {
-            wl.dispatch();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.dispatch();
+        if self.draw_at.is_some_and(|at| mono_ns() >= at)
+            && let Some(g) = &self.gpu
+        {
+            g.window.request_redraw();
+        }
+        if !self.continuous()
+            && self.draw_at.is_none()
+            && let Some(started) = self.started
+        {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                started + WARMUP + Duration::from_secs_f64(self.cfg.secs),
+            ));
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } => {
+            WindowEvent::CursorMoved { position, .. } => {
                 self.winit_pointer_events += 1;
+                let Some(scale) = self.gpu.as_ref().map(|g| g.window.scale_factor()) else {
+                    return;
+                };
+                if self.cfg.scenario == Scenario::Input {
+                    let p = Vec2::new((position.x / scale) as f32, (position.y / scale) as f32);
+                    let world = self.viewport.screen_to_world(p);
+                    match &mut self.live {
+                        Some(s) if s.points.len() < 2_000 => {
+                            s.push(world);
+                        }
+                        _ => {
+                            self.commit_live();
+                            self.live = Some(Stroke::new(world, 2.5, [0.9, 0.6, 0.3, 1.0]));
+                            self.live_serial += 1;
+                        }
+                    }
+                    if let Some(g) = &self.gpu {
+                        g.window.request_redraw();
+                    }
+                }
             }
+            WindowEvent::MouseInput { .. } => self.winit_pointer_events += 1,
             WindowEvent::Resized(size) => {
                 if let Some(g) = &mut self.gpu {
                     g.config.width = size.width.max(1);
@@ -314,27 +459,61 @@ impl Bench {
             self.draw_frame(size, scale, None);
             return;
         }
-        if t > WARMUP + Duration::from_secs_f64(self.cfg.secs) {
+        if self.continuous() && t > WARMUP + Duration::from_secs_f64(self.cfg.secs) {
             self.finish(event_loop);
             return;
         }
-        let start_ns = nc_bench::wl::mono_ns();
+        let on_schedule = match self.cfg.latch {
+            Latch::Fixed(late) => {
+                // The bench may block here; the app waits with a timer instead.
+                std::thread::sleep(late);
+                true
+            }
+            Latch::Adaptive => {
+                let now = mono_ns();
+                match self.draw_at {
+                    Some(at) if now < at => return,
+                    Some(_) => true,
+                    None => match self.scheduler.draw_at(now) {
+                        Some(at) => {
+                            self.draw_at = Some(at);
+                            let wait = Duration::from_nanos(at - now);
+                            event_loop
+                                .set_control_flow(ControlFlow::WaitUntil(Instant::now() + wait));
+                            return;
+                        }
+                        None => false,
+                    },
+                }
+            }
+        };
+        self.draw_at = None;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        self.dispatch();
+        let start_ns = mono_ns();
         let t0 = Instant::now();
         self.script(t.as_secs_f64(), size);
         let recording = t >= WARMUP;
-        let idx = recording.then_some(self.frames.len() as u64);
-        let acquire_ms = self.draw_frame(size, scale, idx);
+        let id = self.frames.len() as u64;
+        if recording {
+            for t in self.pending_motion.drain(..) {
+                self.motion_frames.push((t, id));
+            }
+        } else {
+            self.pending_motion.clear();
+        }
+        let acquire_ms = self.draw_frame(size, scale, recording.then_some(id));
         if recording {
             self.frames.push(FrameRec {
                 start_ns,
                 acquire_ms,
                 cpu_ms: t0.elapsed().as_secs_f64() * 1e3,
+                on_schedule,
             });
         }
-        if let Some(wl) = &mut self.wl {
-            wl.dispatch();
+        if self.continuous() {
+            self.gpu.as_ref().unwrap().window.request_redraw();
         }
-        self.gpu.as_ref().unwrap().window.request_redraw();
     }
 
     /// Returns the swapchain acquire wait in ms.
@@ -353,13 +532,17 @@ impl Bench {
         let acquire_ms = t_acq.elapsed().as_secs_f64() * 1e3;
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = g.device.create_command_encoder(&Default::default());
+        let live = self.live.as_ref().map(|stroke| LiveStroke {
+            serial: self.live_serial,
+            stroke,
+        });
         g.renderer.render(
             &g.device,
             &g.queue,
             &mut encoder,
             &view,
             &self.doc,
-            self.live.as_ref(),
+            live,
             &self.viewport,
             size.to_array(),
             scale,

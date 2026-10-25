@@ -9,8 +9,9 @@ use glam::Vec2;
 use iced::widget::shader::{self, Viewport};
 use iced::{Element, Length, Rectangle, Task, mouse, wgpu, window};
 use nc_bench::stats::Summary;
-use nc_bench::wl::{SideChannel, mono_ns};
 use nc_core::{Document, scene};
+use nc_wayland::{SideChannel, mono_ns};
+use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -68,7 +69,7 @@ impl Bench {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Window(Some(id)) => window::run(id, |w| {
-                *SIDE.lock().unwrap() = SideChannel::new(w);
+                *SIDE.lock().unwrap() = SideChannel::new(w, false);
             })
             .map(|_| Message::SideReady),
             Message::Window(None) => Task::none(),
@@ -134,12 +135,19 @@ impl Bench {
         if let Some(s) = Summary::of(&prepare) {
             println!("cpu in primitive prepare (uniform + sync): {s}");
         }
-        match side.as_ref() {
+        match side.as_mut() {
             Some(s) => {
+                let mut presented = HashMap::new();
+                s.drain_presented(|id, p| {
+                    presented.insert(id, p);
+                });
+                let clock = s.state.clock_id;
                 println!("-- start = the RedrawRequested whose frames() message set this state:");
-                s.print_scanout(&frames.iter().map(|f| f.0).collect::<Vec<_>>());
+                let starts: Vec<u64> = frames.iter().map(|f| f.0).collect();
+                nc_bench::print_scanout(clock, &presented, &starts);
                 println!("-- start = primitive prepare (the draw itself) began:");
-                s.print_scanout(&frames.iter().map(|f| f.1).collect::<Vec<_>>());
+                let starts: Vec<u64> = frames.iter().map(|f| f.1).collect();
+                nc_bench::print_scanout(clock, &presented, &starts);
             }
             None => println!("no wp_presentation: scanout timing unavailable"),
         }

@@ -2,9 +2,12 @@
 //! window surface, offscreen tests and PNG export.
 
 use bytemuck::{Pod, Zeroable};
-use nc_core::document::stroke_segments;
-use nc_core::{Document, Segment, Stroke, Viewport};
+use nc_core::document::{stroke_segment_count, stroke_segments, stroke_segments_from};
+use nc_core::{Document, Element, ElementId, ElementKind, Segment, Stroke, Viewport};
+use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
+use std::ops::Range;
+use std::sync::Arc;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -56,20 +59,62 @@ pub const CLEAR: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
+/// The stroke under the pen. `serial` changes for every new stroke, so the renderer knows to restart its
+/// append-only upload.
+#[derive(Clone, Copy)]
+pub struct LiveStroke<'a> {
+    pub serial: u64,
+    pub stroke: &'a Stroke,
+}
+
+/// What the last frame cost, for tests and the bench.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderStats {
+    /// Instanced draws for committed strokes (one per contiguous run in z-order).
+    pub stroke_draws: u32,
+    /// Arena slots in use, including holes left by erased or edited strokes.
+    pub arena_segments: u32,
+    pub holes: u32,
+    /// Full re-uploads of the arena since the renderer was created.
+    pub rebuilds: u64,
+    /// Segments uploaded for the live stroke in the last frame.
+    pub live_uploaded: u32,
+}
+
+/// A committed stroke's segments in the arena. Valid while the document still holds this exact `Arc`:
+/// every edit replaces the `Arc`, so pointer identity is the element's revision.
+struct Cached {
+    element: Arc<Element>,
+    start: u32,
+    count: u32,
+    seen: u64,
+}
+
+/// Compact when z-order is split into more draws than this.
+const MAX_RUNS: usize = 64;
+const MIN_ARENA: u32 = 4096;
+
 pub struct Renderer {
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     grid: wgpu::RenderPipeline,
     strokes: wgpu::RenderPipeline,
-    instances: wgpu::Buffer,
-    capacity: u64,
-    uploaded: u64,
-    generation: u64,
-    /// The stroke being drawn, rewritten every frame from `live_scratch` (no per-frame allocation).
+    /// Every committed stroke's segments, one contiguous range per stroke.
+    arena: wgpu::Buffer,
+    arena_capacity: u32,
+    arena_len: u32,
+    holes: u32,
+    cache: HashMap<ElementId, Cached>,
+    frame: u64,
+    runs: Vec<Range<u32>>,
+    rebuilds: u64,
+    /// The stroke being drawn: only its new tail is uploaded each frame.
     live: wgpu::Buffer,
-    live_capacity: u64,
-    live_count: u32,
-    live_scratch: Vec<SegmentInstance>,
+    live_capacity: u32,
+    live_serial: Option<u64>,
+    live_len: u32,
+    live_uploaded: u32,
+    scratch: Vec<SegmentInstance>,
 }
 
 fn instance(s: Segment) -> SegmentInstance {
@@ -80,6 +125,15 @@ fn instance(s: Segment) -> SegmentInstance {
         color: s.color,
     }
 }
+
+fn push_run(runs: &mut Vec<Range<u32>>, start: u32, count: u32) {
+    match runs.last_mut() {
+        Some(last) if last.end == start => last.end += count,
+        _ => runs.push(start..start + count),
+    }
+}
+
+const STRIDE: u64 = size_of::<SegmentInstance>() as u64;
 
 impl Renderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
@@ -149,84 +203,189 @@ impl Renderer {
             "vs_seg",
             "fs_seg",
             &[Some(wgpu::VertexBufferLayout {
-                array_stride: size_of::<SegmentInstance>() as u64,
+                array_stride: STRIDE,
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes: &SEGMENT_ATTRS,
             })],
             Some(wgpu::BlendState::ALPHA_BLENDING),
         );
-        let capacity = 4096;
         Self {
             uniform,
             bind_group,
             grid,
             strokes,
-            instances: Self::instance_buffer(device, capacity),
-            capacity,
-            uploaded: 0,
-            generation: u64::MAX,
+            arena: Self::instance_buffer(device, MIN_ARENA),
+            arena_capacity: MIN_ARENA,
+            arena_len: 0,
+            holes: 0,
+            cache: HashMap::new(),
+            frame: 0,
+            runs: Vec::new(),
+            rebuilds: 0,
             live: Self::instance_buffer(device, 1024),
             live_capacity: 1024,
-            live_count: 0,
-            live_scratch: Vec::new(),
+            live_serial: None,
+            live_len: 0,
+            live_uploaded: 0,
+            scratch: Vec::new(),
         }
     }
 
-    fn instance_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    fn instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("segments"),
-            size: capacity * size_of::<SegmentInstance>() as u64,
+            size: capacity as u64 * STRIDE,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
     }
 
-    /// Uploads only segments appended since the last call; rebuilds when `doc.generation` changes.
-    // shortcut: walks the segment iterator from the start to find the tail (O(points) CPU per sync, ~0.2 ms
-    // at 200k points); upgrade to per-stroke GPU caches + tile cache in Phase 2 (docs/PLAN.md §5).
+    pub fn stats(&self) -> RenderStats {
+        RenderStats {
+            stroke_draws: self.runs.len() as u32,
+            arena_segments: self.arena_len,
+            holes: self.holes,
+            rebuilds: self.rebuilds,
+            live_uploaded: self.live_uploaded,
+        }
+    }
+
+    /// Brings the arena in line with `doc`: uploads only strokes that are new or edited since the last
+    /// frame, and lists the draws in z-order. O(elements) per frame, O(points) only for what changed.
     fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document) {
         #[cfg(feature = "profile")]
         let _span = tracy_client::span!("Renderer::sync");
-        if doc.generation() != self.generation {
-            self.generation = doc.generation();
-            self.uploaded = 0;
+        self.frame += 1;
+        self.runs.clear();
+        let mut overflow = false;
+        for element in doc.elements() {
+            let ElementKind::Stroke(stroke) = &element.kind else {
+                continue;
+            };
+            let current = match self.cache.get_mut(&element.id) {
+                Some(c) if Arc::ptr_eq(&c.element, element) => Some(c),
+                _ => None,
+            };
+            let (start, count) = match current {
+                Some(c) => {
+                    c.seen = self.frame;
+                    (c.start, c.count)
+                }
+                None => {
+                    let count = stroke_segment_count(stroke) as u32;
+                    if self.arena_len + count > self.arena_capacity {
+                        overflow = true;
+                        break;
+                    }
+                    self.scratch.clear();
+                    self.scratch.extend(stroke_segments(stroke).map(instance));
+                    let start = self.arena_len;
+                    queue.write_buffer(
+                        &self.arena,
+                        start as u64 * STRIDE,
+                        bytemuck::cast_slice(&self.scratch),
+                    );
+                    self.arena_len += count;
+                    let old = self.cache.insert(
+                        element.id,
+                        Cached {
+                            element: element.clone(),
+                            start,
+                            count,
+                            seen: self.frame,
+                        },
+                    );
+                    self.holes += old.map_or(0, |o| o.count);
+                    (start, count)
+                }
+            };
+            push_run(&mut self.runs, start, count);
         }
-        let total = doc.segments().count() as u64;
-        if total > self.capacity {
-            self.capacity = total.next_power_of_two();
-            self.instances = Self::instance_buffer(device, self.capacity);
-            self.uploaded = 0;
+        let frame = self.frame;
+        let mut freed = 0;
+        self.cache.retain(|_, c| {
+            let keep = c.seen == frame;
+            if !keep {
+                freed += c.count;
+            }
+            keep
+        });
+        self.holes += freed;
+        if overflow || self.holes * 2 > self.arena_len.max(MIN_ARENA) || self.runs.len() > MAX_RUNS
+        {
+            self.rebuild(device, queue, doc);
         }
-        if total < self.uploaded {
-            self.uploaded = 0;
-        }
-        let tail: Vec<SegmentInstance> = doc
-            .segments()
-            .skip(self.uploaded as usize)
-            .map(instance)
-            .collect();
-        if !tail.is_empty() {
-            let at = self.uploaded * size_of::<SegmentInstance>() as u64;
-            queue.write_buffer(&self.instances, at, bytemuck::cast_slice(&tail));
-        }
-        self.uploaded = total;
     }
 
-    fn sync_live(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, live: Option<&Stroke>) {
-        self.live_scratch.clear();
-        if let Some(stroke) = live {
-            self.live_scratch
-                .extend(stroke_segments(stroke).map(instance));
+    /// Re-uploads every stroke contiguously in z-order: one draw, no holes.
+    fn rebuild(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document) {
+        self.cache.clear();
+        self.scratch.clear();
+        self.runs.clear();
+        for element in doc.elements() {
+            if let ElementKind::Stroke(stroke) = &element.kind {
+                let start = self.scratch.len() as u32;
+                self.scratch.extend(stroke_segments(stroke).map(instance));
+                let count = self.scratch.len() as u32 - start;
+                self.cache.insert(
+                    element.id,
+                    Cached {
+                        element: element.clone(),
+                        start,
+                        count,
+                        seen: self.frame,
+                    },
+                );
+            }
         }
-        let n = self.live_scratch.len() as u64;
-        if n > self.live_capacity {
-            self.live_capacity = n.next_power_of_two();
+        let total = self.scratch.len() as u32;
+        // Room to append half as much again before the next rebuild.
+        let needed = (total + total / 2).max(MIN_ARENA).next_power_of_two();
+        if needed > self.arena_capacity {
+            self.arena_capacity = needed;
+            self.arena = Self::instance_buffer(device, needed);
+        }
+        if total > 0 {
+            queue.write_buffer(&self.arena, 0, bytemuck::cast_slice(&self.scratch));
+            self.runs.push(0..total);
+        }
+        self.arena_len = total;
+        self.holes = 0;
+        self.rebuilds += 1;
+    }
+
+    fn sync_live(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, live: Option<LiveStroke>) {
+        let Some(live) = live else {
+            self.live_serial = None;
+            self.live_len = 0;
+            self.live_uploaded = 0;
+            return;
+        };
+        if self.live_serial != Some(live.serial) {
+            self.live_serial = Some(live.serial);
+            self.live_len = 0;
+        }
+        let total = stroke_segment_count(live.stroke) as u32;
+        if total > self.live_capacity {
+            self.live_capacity = total.next_power_of_two();
             self.live = Self::instance_buffer(device, self.live_capacity);
+            self.live_len = 0;
         }
-        if n > 0 {
-            queue.write_buffer(&self.live, 0, bytemuck::cast_slice(&self.live_scratch));
+        // The last uploaded segment is sent again: a lone dot becomes a real segment once a second point
+        // arrives.
+        let from = self.live_len.saturating_sub(1).min(total);
+        self.scratch.clear();
+        self.scratch
+            .extend(stroke_segments_from(live.stroke, from as usize).map(instance));
+        if !self.scratch.is_empty() {
+            queue.write_buffer(
+                &self.live,
+                from as u64 * STRIDE,
+                bytemuck::cast_slice(&self.scratch),
+            );
         }
-        self.live_count = n as u32;
+        self.live_uploaded = self.scratch.len() as u32;
+        self.live_len = total;
     }
 
     /// Draws grid, the document and the stroke being drawn (on top) into `target`. `size` is logical px;
@@ -239,7 +398,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         doc: &Document,
-        live: Option<&Stroke>,
+        live: Option<LiveStroke>,
         viewport: &Viewport,
         size: [f32; 2],
         px_per_pt: f32,
@@ -273,123 +432,19 @@ impl Renderer {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_pipeline(&self.grid);
         pass.draw(0..3, 0..1);
-        if self.uploaded > 0 {
-            pass.set_pipeline(&self.strokes);
-            pass.set_vertex_buffer(0, self.instances.slice(..));
-            pass.draw(0..6, 0..self.uploaded as u32);
+        pass.set_pipeline(&self.strokes);
+        if !self.runs.is_empty() {
+            pass.set_vertex_buffer(0, self.arena.slice(..));
+            for run in &self.runs {
+                pass.draw(0..6, run.clone());
+            }
         }
-        if self.live_count > 0 {
-            pass.set_pipeline(&self.strokes);
+        if self.live_len > 0 {
             pass.set_vertex_buffer(0, self.live.slice(..));
-            pass.draw(0..6, 0..self.live_count);
+            pass.draw(0..6, 0..self.live_len);
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use glam::Vec2;
-    use nc_core::Element;
-    use std::sync::Arc;
-
-    #[test]
-    fn segment_layout_is_tight() {
-        assert_eq!(size_of::<SegmentInstance>(), 36);
-        assert_eq!(offset_of!(SegmentInstance, color), 20);
-        assert_eq!(size_of::<ViewUniform>() % 16, 0);
-    }
-
-    /// Renders a committed and a live stroke offscreen and checks ink lands at the top-left-origin position.
-    #[test]
-    fn draws_stroke_offscreen() {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
-            eprintln!("no GPU adapter; skipping offscreen render test");
-            return;
-        };
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
-        let (w, h) = (64u32, 64u32);
-        let format = wgpu::TextureFormat::Rgba8Unorm;
-        let tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = tex.create_view(&Default::default());
-        let mut stroke = Stroke::new(Vec2::new(8.0, 16.0), 6.0, [1.0, 0.0, 0.0, 1.0]);
-        stroke.push(Vec2::new(56.0, 16.0));
-        let doc = Document::from_elements([Arc::new(Element::stroke(stroke))]);
-        let mut live = Stroke::new(Vec2::new(8.0, 40.0), 6.0, [0.0, 1.0, 0.0, 1.0]);
-        live.push(Vec2::new(56.0, 40.0));
-
-        let mut r = Renderer::new(&device, format);
-        let mut enc = device.create_command_encoder(&Default::default());
-        r.render(
-            &device,
-            &queue,
-            &mut enc,
-            &view,
-            &doc,
-            Some(&live),
-            &Viewport::default(),
-            [w as f32, h as f32],
-            1.0,
-        );
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (256 * h) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        enc.copy_texture_to_buffer(
-            tex.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(256),
-                    rows_per_image: None,
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit([enc.finish()]);
-        readback
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let px = readback.slice(..).get_mapped_range().unwrap();
-        let at = |x: u32, y: u32| &px[(y * 256 + x * 4) as usize..][..4];
-        assert!(
-            at(32, 16)[0] > 240 && at(32, 16)[1] < 20,
-            "ink on the stroke: {:?}",
-            at(32, 16)
-        );
-        assert!(
-            at(32, 40)[1] > 240 && at(32, 40)[0] < 20,
-            "live stroke drawn: {:?}",
-            at(32, 40)
-        );
-        assert!(
-            at(32, 56)[0] < 40 && at(32, 56)[1] < 40,
-            "no ink far below the strokes (y-down): {:?}",
-            at(32, 56)
-        );
-    }
-}
+mod tests;

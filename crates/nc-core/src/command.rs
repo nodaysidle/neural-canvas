@@ -132,12 +132,17 @@ impl History {
         command: Command,
     ) -> Result<(), CommandError> {
         let inverse = command.apply(doc)?;
+        self.record(label, inverse);
+        Ok(())
+    }
+
+    /// Records a step whose command was already applied; `inverse` is what `apply` returned.
+    pub fn record(&mut self, label: &'static str, inverse: Command) {
         self.undo.push(Step {
             label,
             command: inverse,
         });
         self.redo.clear();
-        Ok(())
     }
 
     /// Reverts the last step. `Ok(false)` when there is nothing to undo.
@@ -189,6 +194,8 @@ pub struct Session {
     pub sketch_id: Uuid,
     doc: Document,
     history: History,
+    /// A drag in progress: its label and the inverses of what it applied so far, oldest first.
+    gesture: Option<(&'static str, Vec<Command>)>,
 }
 
 impl Session {
@@ -197,6 +204,7 @@ impl Session {
             sketch_id,
             doc,
             history: History::default(),
+            gesture: None,
         }
     }
 
@@ -209,14 +217,43 @@ impl Session {
     }
 
     pub fn execute(&mut self, label: &'static str, command: Command) -> Result<(), CommandError> {
+        self.end_gesture();
         self.history.execute(&mut self.doc, label, command)
     }
 
+    /// Applies part of a drag (e.g. each stroke an eraser drag touches) right away, so the canvas
+    /// updates live, while the whole drag stays one undo step. Ends with [`end_gesture`](Self::end_gesture).
+    pub fn apply_in_gesture(
+        &mut self,
+        label: &'static str,
+        command: Command,
+    ) -> Result<(), CommandError> {
+        let inverse = command.apply(&mut self.doc)?;
+        match &mut self.gesture {
+            Some((open, inverses)) if *open == label => inverses.push(inverse),
+            _ => {
+                self.end_gesture();
+                self.gesture = Some((label, vec![inverse]));
+            }
+        }
+        Ok(())
+    }
+
+    /// Records the drag in progress as one undo step. Nothing happens if the drag changed nothing.
+    pub fn end_gesture(&mut self) {
+        if let Some((label, mut inverses)) = self.gesture.take() {
+            inverses.reverse();
+            self.history.record(label, Command::Batch(inverses));
+        }
+    }
+
     pub fn undo(&mut self) -> Result<bool, CommandError> {
+        self.end_gesture();
         self.history.undo(&mut self.doc)
     }
 
     pub fn redo(&mut self) -> Result<bool, CommandError> {
+        self.end_gesture();
         self.history.redo(&mut self.doc)
     }
 }
@@ -253,6 +290,39 @@ mod tests {
         let ids: Vec<_> = session.doc().elements().iter().map(|e| e.id).collect();
         assert_eq!(ids, [ida, idb]);
         assert!(!session.redo().unwrap());
+    }
+
+    #[test]
+    fn a_drag_is_one_undo_step() {
+        let strokes: Vec<Element> = (0..5).map(|i| stroke_at(i as f32)).collect();
+        let doc = Document::from_elements(strokes.iter().cloned().map(Arc::new));
+        let original = doc.elements().to_vec();
+        let mut session = Session::new(Uuid::new_v4(), doc);
+        for i in [3, 0, 1] {
+            let id = strokes[i].id;
+            session
+                .apply_in_gesture("Erase", Command::Remove { id })
+                .unwrap();
+        }
+        assert_eq!(session.doc().elements().len(), 2, "applied live");
+        session.end_gesture();
+        assert_eq!(session.history().undo_label(), Some("Erase"));
+        assert!(session.undo().unwrap());
+        assert_eq!(
+            session.doc().elements(),
+            original.as_slice(),
+            "every stroke back in place"
+        );
+        assert!(!session.undo().unwrap(), "the whole drag was one step");
+        assert!(session.redo().unwrap());
+        assert_eq!(session.doc().elements().len(), 2);
+    }
+
+    #[test]
+    fn an_empty_drag_records_nothing() {
+        let mut session = Session::new(Uuid::new_v4(), Document::default());
+        session.end_gesture();
+        assert_eq!(session.history().undo_label(), None);
     }
 
     #[test]

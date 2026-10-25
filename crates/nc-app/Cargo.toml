@@ -19,3 +19,5 @@ pollster.workspace = true
 nc-store.workspace = true
 signal-hook = "0.4"
 dirs = "7"
+mundy = { version = "0.2", default-features = false, features = ["callback", "reduced-motion", "async-io"] }
+nc-wayland.workspace = true

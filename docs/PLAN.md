@@ -38,8 +38,21 @@ Risks taken on, resolved by the Phase 0 spike ([`reports/phase-0.md`](reports/ph
 - **Tablet path:** winit 0.30 plus a `zwp_tablet_v2` side channel; winit 0.31 native once stable.
 - **Present mode:** `Fifo` (`AutoVsync`), `desired_maximum_frame_latency = 1`. Mailbox and Immediate
   measured identical on Hyprland (0 discarded, every frame vsynced, 16.7 ms sample → scanout).
-- **Tile-cache threshold:** 400k visible segments (≈ 4k strokes). S2k all-visible GPU p99 is 1.44 ms;
-  5k strokes reaches 4.04 ms.
+- **Tile-cache threshold:** ~~400k~~ **600k visible segments** (≈ 6k strokes), re-measured in Phase 2 on
+  the per-stroke renderer: all-visible GPU p99 is 1.33 ms at 2k strokes, 2.49 ms at 5k, 4.78 ms at 10k
+  (~0.47 ms per 100k segments), so 4 ms is crossed near 830k; 600k keeps 25 % for overlay and selection.
+  S2k (200k) is 3× under it, so no tile cache is built yet.
+
+### Phase 2 decisions (2026-10-25, [`reports/phase-2.md`](reports/phase-2.md))
+
+- **Frame scheduling:** draw at `vblank + phase`, with `phase` learnt from `wp_presentation` feedback
+  (`nc_core::FrameScheduler`: creep 0.25 ms per 60 on-time frames, back off 1 ms and cap below any
+  miss). Settles at 3.5 ms on the reference machine and cuts real pointer event → scanout by ~3 ms.
+- **Input-to-photon:** event → scanout measured at p50 19.0 / p95 23.2 ms with that schedule. Hyprland's
+  default pipeline shows a frame two refreshes after its sample, so ≤ 20 ms p95 is out of reach from the
+  app alone at 120 Hz; open question 7 (§9).
+- **Wayland side channel:** `crates/nc-wayland` (presentation feedback + `zwp_tablet_v2`) is shared by the
+  app and the bench. It must never read the socket itself (that starves winit's own events).
 
 **Crates (name the library, don't hand-roll):** `glam` (math), `kurbo` (curves, flattening),
 `rstar` (R-tree hit-test/culling), `bytemuck` (`#[repr(C)]` + `Pod` GPU structs), `rusqlite` (bundled,
@@ -60,15 +73,17 @@ crates/
                hit-test (rstar), input (one-euro filter, pressure curve), tools state machine,
                recognize/, style/. No GPU, no window. 100% headless-testable.
   nc-render/   wgpu renderer drawing into any TextureView: grid, committed strokes (per-stroke GPU caches,
-               tile cache above 400k visible segments), live stroke fast path, wireframe overlay, selection chrome.
+               tile cache above 600k visible segments), live stroke fast path, wireframe overlay, selection chrome.
   nc-store/    rusqlite WAL; store thread, 300 ms debounce, flush on switch/close/SIGTERM.
   nc-export/   SVG writer, svg2pdf, PNG, JPEG; raw sketch AND wireframe export.
   nc-app/      `neuralcanvas` binary: window, input routing, actions/shortcuts, shell (own wgpu chrome).
-  nc-bench/    measurement harness (S2k runs, `wp_presentation` timing, tablet probe). Never packaged.
+  nc-wayland/  side channel on winit's wl_display: presentation feedback, tablet-v2 tool input.
+  nc-bench/    measurement harness (S2k runs, `wp_presentation` timing, virtual-pointer input latency,
+               tablet probe, save cost). Never packaged.
   spike-iced/  Phase 0 iced 0.14 host spike, kept as the rerun harness for the shell decision.
 packaging/     PKGBUILD, PKGBUILD-bin, .desktop, metainfo.xml, icons, AppImage recipe.
 ```
-Present after Phase 1: `nc-core`, `nc-render`, `nc-store`, `nc-app`, `nc-bench`, `spike-iced`. `nc-export` arrives in Phase 4.
+Present after Phase 2: `nc-core`, `nc-render`, `nc-store`, `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`. `nc-export` arrives in Phase 4.
 
 **Coordinates (one convention, everywhere):** world space is y-down, origin top-left, 1 unit = 1 logical px
 at 100%. `screen = world * scale + offset`. Matches Wayland, SVG, PDF and PNG; the only flip is world→clip in
@@ -87,7 +102,7 @@ the shader. A test asserts "top stays top" across canvas, overlay, SVG, PDF, PNG
   state flags.
 
 **Render pipeline per frame:** clear → grid (full-screen triangle, world position from the inverse view) →
-committed strokes (instanced SDF capsules; tiles above 400k visible segments) → live stroke →
+committed strokes (instanced SDF capsules from a per-stroke arena; tiles above 600k visible segments) → live stroke →
 recognised-shape / wireframe overlay at user opacity → selection, handles, eraser ring. SDF gives analytic AA
 at every angle, so no MSAA. Vertex attribute offsets come from `offset_of!`, never typed by hand.
 
@@ -192,3 +207,9 @@ loader; build in an Ubuntu 24.04 container for glibc reach. Every artefact gets 
 4. Which pen tablet is on the reference machine (Wacom/Huion/XP-Pen)?
 5. App id domain: `sh.nodaysidle` or other?
 6. AppImage required at launch, or AUR first?
+7. Input-to-photon ≤ 20 ms p95 is not reachable from the app alone on Hyprland's default pipeline
+   (measured p95 23.2 ms event → scanout). Options: amend the budget, add predicted ink (extrapolate the
+   live tail by ~one refresh, as platform ink APIs do), or validate a compositor setting
+   (`render:direct_scanout` for fullscreen). Recommendation: predicted ink, measured, in Phase 3.
+8. Zoom shortcuts: the Phase 2 brief said Ctrl+9 fit / Ctrl+0 100 %; §4 of UX-PRINCIPLES says Ctrl+0 fit /
+   Ctrl+1 100 % (implemented). Which one?

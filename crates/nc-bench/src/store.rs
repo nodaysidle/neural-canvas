@@ -7,8 +7,14 @@ use nc_store::Db;
 use std::path::Path;
 use std::time::Instant;
 
-pub fn run(dir: &Path) {
-    let path = dir.join(format!("nc-bench-{}.db", std::process::id()));
+/// `keep`: write `dir/neuralcanvas.db` and leave it, so the app can open S2k
+/// (`XDG_DATA_HOME=<parent of dir> neuralcanvas`).
+pub fn run(dir: &Path, keep: bool) {
+    let path = if keep {
+        dir.join("neuralcanvas.db")
+    } else {
+        dir.join(format!("nc-bench-{}.db", std::process::id()))
+    };
     let mut db = Db::open(&path).expect("open database");
     let sketch = db.last_or_new_sketch().expect("create sketch");
     let mut doc = db.load(sketch).expect("load");
@@ -55,6 +61,10 @@ pub fn run(dir: &Path) {
         ms(t)
     );
     drop(db);
+    if keep {
+        println!("kept {}", path.display());
+        return;
+    }
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }

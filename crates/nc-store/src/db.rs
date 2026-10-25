@@ -9,9 +9,17 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+/// One schema step. Code steps rewrite element blobs, since postcard is not self-describing.
+enum Migration {
+    Sql(&'static str),
+    Code(fn(&rusqlite::Transaction<'_>) -> Result<()>),
+}
+
 /// `MIGRATIONS[i]` takes the schema from version `i` to `i + 1`; the schema version is
 /// `PRAGMA user_version`. Never edit a shipped entry: append a new one.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[Migration] = &[
+    Migration::Sql(
+        "
     CREATE TABLE projects (
         id         BLOB PRIMARY KEY,
         name       TEXT NOT NULL,
@@ -33,7 +41,65 @@ const MIGRATIONS: &[&str] = &["
         PRIMARY KEY (sketch_id, id)
     ) WITHOUT ROWID;
     CREATE INDEX elements_by_z ON elements (sketch_id, z);
-"];
+",
+    ),
+    Migration::Code(add_stroke_pressure),
+];
+
+/// Element encodings as they were stored by older schema versions, frozen. When `ElementKind`'s
+/// encoding changes again, copy the current types here as the next version first.
+mod format {
+    pub mod v1 {
+        use glam::Vec2;
+        use nc_core::{RecognizedShape, Shape};
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize)]
+        pub enum ElementKind {
+            Stroke(Stroke),
+            Shape(Shape),
+            Recognized(RecognizedShape),
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct Stroke {
+            pub points: Vec<Vec2>,
+            pub width: f32,
+            pub color: [f32; 4],
+        }
+    }
+}
+
+/// v1 → v2: strokes gained a per-point pressure track (empty for every stroke stored before).
+fn add_stroke_pressure(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let rows: Vec<(Uuid, Uuid, Vec<u8>)> = tx
+        .prepare("SELECT sketch_id, id, data FROM elements")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut update =
+        tx.prepare("UPDATE elements SET data = ?3 WHERE sketch_id = ?1 AND id = ?2")?;
+    for (sketch, id, data) in rows {
+        let old: format::v1::ElementKind =
+            postcard::from_bytes(&data).map_err(|e| StoreError::Corrupt {
+                sketch,
+                element: id,
+                reason: e.to_string(),
+            })?;
+        let new = match old {
+            format::v1::ElementKind::Stroke(s) => ElementKind::Stroke(nc_core::Stroke {
+                points: s.points,
+                width: s.width,
+                color: s.color,
+                pressure: Vec::new(),
+            }),
+            format::v1::ElementKind::Shape(s) => ElementKind::Shape(s),
+            format::v1::ElementKind::Recognized(r) => ElementKind::Recognized(r),
+        };
+        let data = postcard::to_stdvec(&new).expect("element kinds always encode");
+        update.execute(params![sketch, id, data])?;
+    }
+    Ok(())
+}
 
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
@@ -286,8 +352,11 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         return Ok(());
     }
     let tx = conn.transaction()?;
-    for sql in &MIGRATIONS[found as usize..] {
-        tx.execute_batch(sql)?;
+    for step in &MIGRATIONS[found as usize..] {
+        match step {
+            Migration::Sql(sql) => tx.execute_batch(sql)?,
+            Migration::Code(f) => f(&tx)?,
+        }
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
@@ -338,6 +407,51 @@ mod tests {
             Db::open(&path),
             Err(StoreError::TooNew { found, supported }) if found == SCHEMA_VERSION + 1 && supported == SCHEMA_VERSION
         ));
+    }
+
+    /// A database written by schema v1 (strokes without pressure) opens and loads unchanged.
+    #[test]
+    fn migrates_v1_strokes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nc.db");
+        let (sketch, id) = (Uuid::new_v4(), Uuid::new_v4());
+        {
+            let conn = Connection::open(&path).unwrap();
+            let Migration::Sql(v1) = &MIGRATIONS[0] else {
+                unreachable!()
+            };
+            conn.execute_batch(v1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            let project = Uuid::new_v4();
+            conn.execute("INSERT INTO projects VALUES (?1, 'P', 0)", [project])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO sketches (id, project_id, name, created_at, updated_at) VALUES (?1, ?2, 'S', 0, 0)",
+                [sketch, project],
+            )
+            .unwrap();
+            let blob = postcard::to_stdvec(&format::v1::ElementKind::Stroke(format::v1::Stroke {
+                points: vec![Vec2::ZERO, Vec2::new(3.0, 4.0)],
+                width: 2.5,
+                color: [0.1, 0.2, 0.3, 1.0],
+            }))
+            .unwrap();
+            conn.execute(
+                "INSERT INTO elements VALUES (?1, ?2, 0, ?3)",
+                params![sketch, id, blob],
+            )
+            .unwrap();
+        }
+        let mut db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+        let doc = db.load(sketch).unwrap();
+        let ElementKind::Stroke(s) = &doc.elements()[0].kind else {
+            panic!("expected a stroke");
+        };
+        assert_eq!(doc.elements()[0].id, id);
+        assert_eq!(s.points, [Vec2::ZERO, Vec2::new(3.0, 4.0)]);
+        assert_eq!((s.width, s.color), (2.5, [0.1, 0.2, 0.3, 1.0]));
+        assert!(s.pressure.is_empty());
     }
 
     #[test]

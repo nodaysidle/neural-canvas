@@ -9,6 +9,7 @@ description = "Phase 0 spike: S2k inside an iced 0.14 shader widget (wgpu 27). M
 [dependencies]
 nc-core.workspace = true
 nc-bench = { path = "../nc-bench" }
+nc-wayland.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 iced = { version = "0.14", features = ["wgpu", "advanced"] }

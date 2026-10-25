@@ -10,8 +10,9 @@ uuid.workspace = true
 rusqlite = { version = "0.41", features = ["bundled", "uuid"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 crossbeam-channel = "0.5"
+glam.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
-glam.workspace = true
 tempfile = "3"
 rusqlite = { version = "0.41", features = ["bundled", "uuid"] }

@@ -11,6 +11,9 @@ serde.workspace = true
 uuid.workspace = true
 rand = { version = "0.10", default-features = false }
 rand_chacha = { version = "0.10", default-features = false }
+one-euro = "0.9"
+# Only to enable `std` for one-euro's nalgebra (f64 math); never used directly.
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 proptest.workspace = true

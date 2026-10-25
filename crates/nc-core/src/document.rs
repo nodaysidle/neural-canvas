@@ -97,15 +97,27 @@ impl Document {
 }
 
 pub fn stroke_segments(s: &Stroke) -> impl Iterator<Item = Segment> + '_ {
-    let (half_width, color) = (s.width * 0.5, s.color);
+    stroke_segments_from(s, 0)
+}
+
+/// Capsules a stroke draws as: one per pair of points, or a single dot for a one-point stroke.
+pub fn stroke_segment_count(s: &Stroke) -> usize {
+    s.points.len().saturating_sub(1).max(s.points.len().min(1))
+}
+
+/// The stroke's capsules from index `first` on, in O(1) to reach `first` (the live stroke uploads only
+/// its new tail each frame).
+pub fn stroke_segments_from(s: &Stroke, first: usize) -> impl Iterator<Item = Segment> + '_ {
+    let color = s.color;
     // A single point is a dot: one zero-length capsule. `windows(2)` yields nothing for it.
-    let dot = (s.points.len() == 1).then(|| (s.points[0], s.points[0]));
+    let dot = (s.points.len() == 1 && first == 0).then(|| (0, s.points[0], s.points[0]));
+    let pairs = s.points.get(first..).unwrap_or(&[]).windows(2);
     dot.into_iter()
-        .chain(s.points.windows(2).map(|w| (w[0], w[1])))
-        .map(move |(a, b)| Segment {
+        .chain(pairs.enumerate().map(move |(i, w)| (first + i, w[0], w[1])))
+        .map(move |(i, a, b)| Segment {
             a,
             b,
-            half_width,
+            half_width: s.half_width(i),
             color,
         })
 }

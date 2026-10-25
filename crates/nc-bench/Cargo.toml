@@ -15,6 +15,6 @@ bytemuck.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 pollster.workspace = true
-wayland-client = { version = "0.31", features = ["system"] }
-wayland-protocols = { version = "0.32", features = ["client"] }
-rustix = { version = "1", features = ["time"] }
+nc-wayland.workspace = true
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
