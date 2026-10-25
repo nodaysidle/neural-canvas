@@ -1,15 +1,39 @@
-# NeuralCanvas for Linux
+<p align="center">
+  <img src="docs/assets/logo.svg" width="148" height="148" alt="NeuralCanvas icon">
+</p>
 
-**A GPU-accelerated sketch-to-wireframe canvas for Linux (Arch + Wayland/Hyprland). Freehand sketches to clean, aligned wireframes with instant style mirroring and vector export.**
+<h1 align="center">NeuralCanvas for Linux</h1>
 
-![Release](https://img.shields.io/badge/release-v0.1.0-blue)
-![Platform](https://img.shields.io/badge/platform-Arch%20%2F%20Wayland%20%2F%20Hyprland-1793d1)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Engine](https://img.shields.io/badge/engine-Rust%20%2F%20wgpu%20%2F%20Vulkan-orange)
+![NeuralCanvas: a sketched layout on the canvas, projects in the sidebar, tools on the left](docs/assets/screenshot.png)
 
-Draw a layout with a mouse or pen. NeuralCanvas recognises the strokes as UI elements, shows a clean wireframe over
-your sketch, lets you edit it, restyles it from a screenshot of any app, and exports it. Everything runs on your
-machine.
+<p align="center">
+  <strong>A GPU-accelerated sketch-to-wireframe canvas for Linux (Arch + Wayland/Hyprland).</strong><br>
+  Freehand sketches to clean, aligned wireframes with instant style mirroring and vector export.
+</p>
+
+<p align="center">
+  <img alt="Release v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-5e9dff?style=flat-square">
+  <img alt="Arch, Wayland, Hyprland" src="https://img.shields.io/badge/Arch%20%2F%20Wayland%20%2F%20Hyprland-native-1f2328?style=flat-square&logo=archlinux&logoColor=1793d1">
+  <img alt="Rust, wgpu, Vulkan" src="https://img.shields.io/badge/Rust%20%2F%20wgpu%20%2F%20Vulkan-engine-CE412B?style=flat-square&logo=rust&logoColor=white">
+  <img alt="Zero telemetry" src="https://img.shields.io/badge/telemetry-none-4c8c6b?style=flat-square">
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
+</p>
+
+<p align="center">
+  <a href="https://github.com/nodaysidle/neural-canvas/releases/download/v0.1.0/NeuralCanvas-0.1.0-x86_64.AppImage"><strong>Download Linux AppImage (v0.1.0)</strong></a>
+  ·
+  <a href="https://github.com/nodaysidle/neural-canvas/releases">All Releases</a>
+</p>
+
+<p align="center">
+  <a href="#core-capabilities">Features</a> ·
+  <a href="#measured-performance">Performance</a> ·
+  <a href="#keyboard-shortcuts">Shortcuts</a> ·
+  <a href="#installation">Install</a> ·
+  <a href="#repository-architecture">Architecture</a>
+</p>
+
+---
 
 ## Core capabilities
 
