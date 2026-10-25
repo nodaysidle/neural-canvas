@@ -20,7 +20,7 @@ optdepends=('vulkan-driver: GPU rendering (vulkan-intel, vulkan-radeon or nvidia
 # read; Cargo's own release profile does the LTO, and strips, so there is no debug package to split.
 options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz")
-sha256sums=('ea2f6fb1f684078a84fe22e38ce1fb03189aa934191f08472cc935a576118186')
+sha256sums=('c8c7d80fa7da831e0bd7c6257ede45bf30f5718f0d47dc9672314e0425905878')
 
 prepare() {
   cd "$pkgname-$pkgver"
