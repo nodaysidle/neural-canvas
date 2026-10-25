@@ -35,7 +35,11 @@ Optional, recommended: a minisign `.minisig` per artefact with the public key in
    into a clean archlinux container and started against the host's Wayland session.
 6. Scripted flow on clean Arch + one non-Arch system: `packaging/smoke.sh <binary or AppImage> <dir>`
    (fresh data folder: new project, draw, style from a screenshot, export, close, relaunch, store
-   unchanged). Run the AppImage on Arch and on Ubuntu or Fedora.
+   unchanged). Run the AppImage on Arch and on Ubuntu or Fedora. Its click and draw positions
+   default to the window filling a 2560×1440 output with the inspector at its default width; on
+   another layout set `SMOKE_NEW_PROJECT`, `SMOKE_PEN_START`, `SMOKE_CARD`, `SMOKE_FIELD`,
+   `SMOKE_BUTTON`, `SMOKE_APPLY` and `SMOKE_SAVE_PRESET` (listed with their defaults in the
+   script's header).
 7. Draft GitHub Release with artefacts **and** their `.sha256` files. A human publishes.
 8. `CHANGELOG.md` gets the version's notes and the artefacts' checksums; it is left out of the source
    tarball (like the PKGBUILDs and reports), so writing it changes no artefact. Tag that commit.

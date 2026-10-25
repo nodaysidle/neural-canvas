@@ -111,7 +111,8 @@ artefacts.
   about half the runs (a held click helped but didn't cure it). It was checked by hand in Phase 6 and
   again in this phase, and both routes share the same reader.
 - **The smoke test is tied to this setup:** Hyprland, a 2560×1440 output (the virtual pointer maps onto
-  it), the inspector at its default width. On other machines it needs its coordinates adjusted.
+  it), the inspector at its default width. On other machines it needs its coordinates adjusted
+  (since made configurable: the `SMOKE_*` variables in the script's header).
 - **X11 was not tried.** The packages list libx11, libxcursor and libxi as optional for X11 sessions.
 - **Not tried on real hardware other than this machine:** the Ubuntu and Fedora runs use this
   machine's Intel GPU through containers.
