@@ -1,0 +1,11 @@
+== launch on a fresh data folder
+== new project
+== draw a card, a field and a button
+== style mirror: paste a screenshot, apply, save as preset
+== export sketch and wireframe
+== close, then check the store
+projects|elements|styled sketches|presets: 2|3|1|1
+== relaunch
+store digest before relaunch: 3db712ec40629ba58096f105eb8df36093d26bde45513095c75cc7537265afcb
+store digest after relaunch:  3db712ec40629ba58096f105eb8df36093d26bde45513095c75cc7537265afcb
+PASS

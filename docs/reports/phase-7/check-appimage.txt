@@ -1,0 +1,31 @@
+== ubuntu:24.04 (PRETTY_NAME="Ubuntu 24.04.5 LTS")
+window appeared: yes
+libraries:
+/tmp/appimage_extracted_b1c0f7204664407aa29fcb8cfc3e1f2f/usr/lib/fallback/libvulkan.so.1
+/tmp/appimage_extracted_b1c0f7204664407aa29fcb8cfc3e1f2f/usr/lib/fallback/libxkbcommon.so.0
+/usr/lib/x86_64-linux-gnu/libvulkan_asahi.so
+/usr/lib/x86_64-linux-gnu/libvulkan_gfxstream.so
+/usr/lib/x86_64-linux-gnu/libvulkan_intel.so
+/usr/lib/x86_64-linux-gnu/libvulkan_intel_hasvk.so
+/usr/lib/x86_64-linux-gnu/libvulkan_lvp.so
+/usr/lib/x86_64-linux-gnu/libvulkan_nouveau.so
+/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so
+/usr/lib/x86_64-linux-gnu/libvulkan_virtio.so
+/usr/lib/x86_64-linux-gnu/libwayland-client.so.0.22.0
+== fedora:41 (PRETTY_NAME="Fedora Linux 41 (Container Image)")
+xkbcommon: ERROR: couldn't find a Compose file for locale "C" (mapped to "C")
+window appeared: yes
+libraries:
+/tmp/appimage_extracted_b1c0f7204664407aa29fcb8cfc3e1f2f/usr/lib/fallback/libvulkan.so.1
+/tmp/appimage_extracted_b1c0f7204664407aa29fcb8cfc3e1f2f/usr/lib/fallback/libxkbcommon.so.0
+/usr/lib64/libvulkan_broadcom.so
+/usr/lib64/libvulkan_freedreno.so
+/usr/lib64/libvulkan_intel.so
+/usr/lib64/libvulkan_intel_hasvk.so
+/usr/lib64/libvulkan_lvp.so
+/usr/lib64/libvulkan_nouveau.so
+/usr/lib64/libvulkan_panfrost.so
+/usr/lib64/libvulkan_powervr_mesa.so
+/usr/lib64/libvulkan_radeon.so
+/usr/lib64/libvulkan_virtio.so
+/usr/lib64/libwayland-client.so.0.24.0

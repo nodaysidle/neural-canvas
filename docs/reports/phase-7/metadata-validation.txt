@@ -1,0 +1,7 @@
+$ desktop-file-validate packaging/sh.nodaysidle.NeuralCanvas.desktop
+(no output: valid)
+
+$ appstreamcli validate --pedantic packaging/sh.nodaysidle.NeuralCanvas.metainfo.xml
+P: sh.nodaysidle.NeuralCanvas:3: cid-contains-uppercase-letter sh.nodaysidle.NeuralCanvas
+
+✔ Validation was successful: pedantic: 1

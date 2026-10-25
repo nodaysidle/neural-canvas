@@ -1,0 +1,6 @@
+namcap PKGBUILD (neuralcanvas-bin):
+namcap package (neuralcanvas-bin):
+neuralcanvas-bin W: Unused shared library '/usr/lib64/ld-linux-x86-64.so.2' by file ('usr/bin/neuralcanvas')
+neuralcanvas-bin W: Dependency included, but may not be needed ('libxkbcommon')
+neuralcanvas-bin W: Dependency included, but may not be needed ('vulkan-icd-loader')
+neuralcanvas-bin W: Dependency included, but may not be needed ('wayland')
