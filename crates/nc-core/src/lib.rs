@@ -9,6 +9,7 @@ pub mod document;
 pub mod element;
 pub mod hit;
 pub mod input;
+pub mod recognize;
 pub mod scene;
 pub mod schedule;
 pub mod select;

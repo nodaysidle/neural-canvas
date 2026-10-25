@@ -6,6 +6,7 @@ mod app;
 mod chrome;
 mod clipboard;
 mod gpu;
+mod workers;
 
 use app::App;
 use nc_core::{Document, Session};
@@ -22,6 +23,14 @@ pub enum UserEvent {
     /// Elements read from the clipboard, to be centred on the point (world units).
     Pasted(Vec<nc_core::Element>, glam::Vec2),
     ClipboardFailed(String),
+    /// A wireframe, for the sketch and revision it was recognised from.
+    Recognized {
+        sketch: uuid::Uuid,
+        revision: u64,
+        wire: std::sync::Arc<nc_core::recognize::Wireframe>,
+    },
+    /// Export finished: the files' shared path without extension, or what went wrong.
+    Exported(Result<std::path::PathBuf, String>),
 }
 
 /// Opens the store and the most recent sketch. A damaged sketch opens read-only and empty; anything

@@ -16,6 +16,9 @@ rstar = "0.13"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 # Only to enable `std` for one-euro's nalgebra (f64 math); never used directly.
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
+ramer_douglas_peucker = "0.2"
+mint = "0.5"
 
 [dev-dependencies]
 proptest.workspace = true
+serde_json = "1"

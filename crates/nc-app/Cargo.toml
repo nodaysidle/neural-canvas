@@ -22,4 +22,7 @@ dirs = "7"
 mundy = { version = "0.2", default-features = false, features = ["callback", "reduced-motion", "async-io"] }
 nc-wayland.workspace = true
 nc-export.workspace = true
+crossbeam-channel = "0.5"
+uuid.workspace = true
 wl-clipboard-rs = "0.9"
+libc = "0.2"

@@ -22,6 +22,19 @@ pub enum Action {
         dx: i8,
         dy: i8,
     },
+    /// Raw sketch → hybrid → wireframe → raw.
+    CycleWireframe,
+    /// Wireframe opacity up or down a step (`]` / `[`).
+    WireframeOpacity {
+        up: bool,
+    },
+    SideBySide,
+    /// Zoom to the next element the quality gate flagged.
+    ReviewUncertain,
+    /// Write SVG, PDF, PNG and JPEG of the sketch, or of its wireframe.
+    Export {
+        wireframe: bool,
+    },
 }
 
 /// A key, independent of the windowing library. Characters are unshifted and lowercase.
@@ -58,6 +71,12 @@ impl Shortcut {
             (true, false, Key::Char('d')) => Some(Action::Duplicate),
             (true, false, Key::Char('c')) => Some(Action::Copy),
             (true, false, Key::Char('v')) => Some(Action::Paste),
+            (true, shift, Key::Char('e')) => Some(Action::Export { wireframe: shift }),
+            (false, false, Key::Char('w')) => Some(Action::CycleWireframe),
+            (false, true, Key::Char('w')) => Some(Action::SideBySide),
+            (false, false, Key::Char('[')) => Some(Action::WireframeOpacity { up: false }),
+            (false, false, Key::Char(']')) => Some(Action::WireframeOpacity { up: true }),
+            (false, false, Key::Char('u')) => Some(Action::ReviewUncertain),
             (false, false, Key::Delete | Key::Backspace) => Some(Action::Delete),
             (false, false, Key::Escape) => Some(Action::Deselect),
             (false, _, Key::Left) => nudge(-step, 0),
@@ -77,7 +96,15 @@ impl Action {
             Self::Deselect | Self::Delete | Self::Duplicate | Self::Copy | Self::Nudge { .. } => {
                 has_selection
             }
-            Self::FitToContent | Self::ActualSize | Self::SelectAll | Self::Paste => true,
+            Self::FitToContent
+            | Self::ActualSize
+            | Self::SelectAll
+            | Self::Paste
+            | Self::CycleWireframe
+            | Self::WireframeOpacity { .. }
+            | Self::SideBySide
+            | Self::ReviewUncertain
+            | Self::Export { .. } => true,
         }
     }
 
@@ -112,6 +139,13 @@ impl Action {
             Self::Copy => "Copy".into(),
             Self::Paste => "Paste".into(),
             Self::Nudge { .. } => "Nudge".into(),
+            Self::CycleWireframe => "Show Wireframe".into(),
+            Self::WireframeOpacity { up: true } => "More Wireframe".into(),
+            Self::WireframeOpacity { up: false } => "Less Wireframe".into(),
+            Self::SideBySide => "Side by Side".into(),
+            Self::ReviewUncertain => "Review Uncertain Items".into(),
+            Self::Export { wireframe: false } => "Export Sketch".into(),
+            Self::Export { wireframe: true } => "Export Wireframe".into(),
         }
     }
 
@@ -128,6 +162,13 @@ impl Action {
             Self::Copy => "Ctrl+C",
             Self::Paste => "Ctrl+V",
             Self::Nudge { .. } => "Arrows",
+            Self::CycleWireframe => "W",
+            Self::WireframeOpacity { up: true } => "]",
+            Self::WireframeOpacity { up: false } => "[",
+            Self::SideBySide => "Shift+W",
+            Self::ReviewUncertain => "U",
+            Self::Export { wireframe: false } => "Ctrl+E",
+            Self::Export { wireframe: true } => "Ctrl+Shift+E",
         }
     }
 }
@@ -162,6 +203,22 @@ mod tests {
         assert_eq!(key(true, false, 'c'), Some(Action::Copy));
         assert_eq!(key(true, false, 'v'), Some(Action::Paste));
         assert_eq!(key(false, false, 'v'), None, "plain V is the select tool");
+        assert_eq!(key(false, false, 'w'), Some(Action::CycleWireframe));
+        assert_eq!(key(false, true, 'w'), Some(Action::SideBySide));
+        assert_eq!(
+            key(false, false, ']'),
+            Some(Action::WireframeOpacity { up: true })
+        );
+        assert_eq!(key(false, false, 'u'), Some(Action::ReviewUncertain));
+        assert_eq!(
+            key(true, true, 'e'),
+            Some(Action::Export { wireframe: true })
+        );
+        assert_eq!(
+            key(true, false, 'e'),
+            Some(Action::Export { wireframe: false })
+        );
+        assert_eq!(key(false, false, 'e'), None, "plain E is the eraser");
         let named = |shift, key| {
             Shortcut {
                 ctrl: false,

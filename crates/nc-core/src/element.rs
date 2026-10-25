@@ -248,9 +248,9 @@ pub struct RecognizedShape {
     pub sources: Vec<ElementId>,
 }
 
-/// Names kept from the Swift app's `ShapeType`. Only the cases the port plan names are listed; the
-/// remaining Swift cases are appended (never inserted: blobs encode the variant index) in Phase 4.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The Swift app's `ShapeType`, all 15 cases with their names. Append only, never reorder: stored blobs
+/// encode the variant index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ShapeType {
     Button,
     InputField,
@@ -260,6 +260,70 @@ pub enum ShapeType {
     Icon,
     Image,
     Text,
+    // Appended in Phase 4: the raw geometry recognition falls back to.
+    Rectangle,
+    RoundedRectangle,
+    Circle,
+    Ellipse,
+    Line,
+    Arrow,
+    Unknown,
+}
+
+impl ShapeType {
+    pub const ALL: [Self; 15] = [
+        Self::Button,
+        Self::InputField,
+        Self::Card,
+        Self::Container,
+        Self::Divider,
+        Self::Icon,
+        Self::Image,
+        Self::Text,
+        Self::Rectangle,
+        Self::RoundedRectangle,
+        Self::Circle,
+        Self::Ellipse,
+        Self::Line,
+        Self::Arrow,
+        Self::Unknown,
+    ];
+
+    /// User-facing name, as in the Swift app.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Button => "Button",
+            Self::InputField => "Input Field",
+            Self::Card => "Card",
+            Self::Container => "Container",
+            Self::Divider => "Divider",
+            Self::Icon => "Icon",
+            Self::Image => "Image",
+            Self::Text => "Text",
+            Self::Rectangle => "Rectangle",
+            Self::RoundedRectangle => "Rounded Rectangle",
+            Self::Circle => "Circle",
+            Self::Ellipse => "Ellipse",
+            Self::Line => "Line",
+            Self::Arrow => "Arrow",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    /// A UI element rather than raw geometry.
+    pub fn is_semantic(self) -> bool {
+        matches!(
+            self,
+            Self::Text
+                | Self::Button
+                | Self::InputField
+                | Self::Card
+                | Self::Image
+                | Self::Icon
+                | Self::Divider
+                | Self::Container
+        )
+    }
 }
 
 #[cfg(test)]

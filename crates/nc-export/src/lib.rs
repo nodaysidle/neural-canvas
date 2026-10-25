@@ -1,7 +1,9 @@
-//! Export of sketch elements. SVG is written here and is the single source of truth: PNG is rendered
-//! from it (resvg), and PDF will be converted from it (Phase 4). World units map 1:1 to SVG user units,
+//! Export of the raw sketch and of its wireframe. SVG is written here and is the single source of
+//! truth: PNG and JPEG are rendered from it (resvg), PDF is converted from it (svg2pdf). World units map 1:1 to SVG user units,
 //! y-down like the canvas, so nothing flips (Mac bug #11).
 
+use nc_core::recognize::Wireframe;
+use nc_core::recognize::draw::{self, Mark};
 use nc_core::{Element, ElementKind, Rect, ShapeKind, Stroke};
 use resvg::{tiny_skia, usvg};
 use std::fmt::Write;
@@ -67,14 +69,9 @@ fn stroke_svg(out: &mut String, s: &Stroke) {
     }
 }
 
-/// An SVG document showing `elements` in z-order, cropped to their bounds, optionally on a solid
-/// `background`. `None` when nothing has bounds.
-pub fn svg(elements: &[Arc<Element>], background: Option<[f32; 4]>) -> Option<String> {
-    let b: Rect = elements
-        .iter()
-        .filter_map(|e| e.bounds())
-        .reduce(|a, b| a.union(b))?
-        .inflate(1.0, 1.0);
+/// The `<svg>` opening for content within `bounds`, plus the background.
+fn header(bounds: Rect, background: Option<[f32; 4]>) -> String {
+    let b = bounds.inflate(1.0, 1.0);
     let mut out = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0}" height="{h:.0}" viewBox="{x:.2} {y:.2} {w:.2} {h:.2}">
 "#,
@@ -91,6 +88,17 @@ pub fn svg(elements: &[Arc<Element>], background: Option<[f32; 4]>) -> Option<St
             b.x0, b.y0
         );
     }
+    out
+}
+
+/// An SVG document of `elements` (raw sketch) in z-order, cropped to their bounds, optionally on a solid
+/// `background`. `None` when nothing has bounds.
+pub fn svg(elements: &[Arc<Element>], background: Option<[f32; 4]>) -> Option<String> {
+    let b: Rect = elements
+        .iter()
+        .filter_map(|e| e.bounds())
+        .reduce(|a, b| a.union(b))?;
+    let mut out = header(b, background);
     for e in elements {
         match &e.kind {
             ElementKind::Stroke(s) => stroke_svg(&mut out, s),
@@ -136,6 +144,71 @@ pub fn svg(elements: &[Arc<Element>], background: Option<[f32; 4]>) -> Option<St
     Some(out)
 }
 
+/// The wireframe as SVG, drawn from the same marks as the canvas overlay (uncertain elements in their
+/// own colour). `None` when it is empty.
+pub fn wireframe_svg(wire: &Wireframe, background: Option<[f32; 4]>) -> Option<String> {
+    let b = wire
+        .shapes
+        .iter()
+        .map(|s| s.bounds)
+        .reduce(|a, b| a.union(b))?
+        .inflate(draw::LINE_WIDTH as f64, draw::LINE_WIDTH as f64);
+    let mut out = header(b, background);
+    let mut marks = Vec::new();
+    for shape in &wire.shapes {
+        marks.clear();
+        draw::marks(shape, &mut marks);
+        let color = if shape.is_uncertain() {
+            draw::UNCERTAIN
+        } else {
+            draw::WIRE
+        };
+        let stroke = format!(
+            r#"fill="none" stroke="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round""#,
+            paint(color),
+            draw::LINE_WIDTH
+        );
+        for m in &marks {
+            let _ = match *m {
+                Mark::Rect { rect: r, radius } => writeln!(
+                    out,
+                    r#"<rect x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" rx="{radius:.2}" {stroke}/>"#,
+                    r.x0,
+                    r.y0,
+                    r.width(),
+                    r.height()
+                ),
+                Mark::Ellipse { rect: r } => writeln!(
+                    out,
+                    r#"<ellipse cx="{:.2}" cy="{:.2}" rx="{:.2}" ry="{:.2}" {stroke}/>"#,
+                    r.center().x,
+                    r.center().y,
+                    r.width() / 2.0,
+                    r.height() / 2.0
+                ),
+                Mark::Line { a, b } => writeln!(
+                    out,
+                    r#"<line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}" {stroke}/>"#,
+                    a.x, a.y, b.x, b.y
+                ),
+                // As the canvas draws it: one round-capped line as thick as the bar, at 55 % opacity.
+                Mark::Bar { rect: r } => {
+                    let (h, cy) = (r.height(), r.center().y);
+                    writeln!(
+                        out,
+                        r#"<line x1="{:.2}" y1="{cy:.2}" x2="{:.2}" y2="{cy:.2}" stroke="{}" stroke-width="{h:.2}" stroke-linecap="round"/>"#,
+                        r.x0 + h / 2.0,
+                        (r.x1 - h / 2.0).max(r.x0 + h / 2.0),
+                        paint([color[0], color[1], color[2], color[3] * 0.55])
+                    )
+                }
+            };
+        }
+    }
+    out.push_str("</svg>\n");
+    Some(out)
+}
+
 #[derive(Debug)]
 pub struct ExportError(String);
 
@@ -147,10 +220,12 @@ impl std::fmt::Display for ExportError {
 
 impl std::error::Error for ExportError {}
 
-/// Renders an SVG to PNG bytes at `scale` device px per unit.
-pub fn png(svg: &str, scale: f32) -> Result<Vec<u8>, ExportError> {
-    let tree = usvg::Tree::from_str(svg, &usvg::Options::default())
-        .map_err(|e| ExportError(e.to_string()))?;
+fn tree(svg: &str) -> Result<usvg::Tree, ExportError> {
+    usvg::Tree::from_str(svg, &usvg::Options::default()).map_err(|e| ExportError(e.to_string()))
+}
+
+fn raster(svg: &str, scale: f32) -> Result<tiny_skia::Pixmap, ExportError> {
+    let tree = tree(svg)?;
     let size = tree
         .size()
         .to_int_size()
@@ -163,7 +238,47 @@ pub fn png(svg: &str, scale: f32) -> Result<Vec<u8>, ExportError> {
         tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
-    pixmap.encode_png().map_err(|e| ExportError(e.to_string()))
+    Ok(pixmap)
+}
+
+/// Renders an SVG to PNG bytes at `scale` device px per unit.
+pub fn png(svg: &str, scale: f32) -> Result<Vec<u8>, ExportError> {
+    raster(svg, scale)?
+        .encode_png()
+        .map_err(|e| ExportError(e.to_string()))
+}
+
+/// Renders an SVG to JPEG at `scale`. JPEG has no transparency: give the SVG a background.
+pub fn jpeg(svg: &str, scale: f32) -> Result<Vec<u8>, ExportError> {
+    let pixmap = raster(svg, scale)?;
+    // Opaque pixels once a background is drawn, so premultiplied RGB is plain RGB.
+    let rgb: Vec<u8> = pixmap
+        .data()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92)
+        .encode(
+            &rgb,
+            pixmap.width(),
+            pixmap.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| ExportError(e.to_string()))?;
+    Ok(out)
+}
+
+/// Converts an SVG to a one-page PDF (svg2pdf), 1 unit = 1 pt.
+pub fn pdf(svg: &str) -> Result<Vec<u8>, ExportError> {
+    svg2pdf::to_pdf(
+        &tree(svg)?,
+        svg2pdf::ConversionOptions::default(),
+        svg2pdf::PageOptions::default(),
+    )
+    .map_err(|e| ExportError(e.to_string()))
 }
 
 #[cfg(test)]
@@ -201,6 +316,33 @@ mod tests {
         assert!(super::svg(&[], None).is_none());
     }
 
+    fn wire() -> Wireframe {
+        nc_core::recognize::recognize(&doc())
+    }
+
+    #[test]
+    fn wireframe_svg_uses_native_elements_in_world_units() {
+        let svg = wireframe_svg(&wire(), None).unwrap();
+        assert!(svg.contains("<line "), "{svg}");
+        assert!(svg.contains("<rect ") && svg.contains(" rx="), "{svg}");
+        assert!(wireframe_svg(&Wireframe::default(), None).is_none());
+    }
+
+    /// Red (or wireframe blue) ink in the top band, the rectangle's edge in the bottom band, nothing
+    /// in between: the output is the right way up. `px` maps world y to image rows.
+    fn assert_top_stays_top(
+        rgba: impl Fn(u32, u32) -> [u8; 4],
+        top: u32,
+        mid: u32,
+        bottom: u32,
+        x: u32,
+    ) {
+        let lit = |y: u32| (0..3).any(|dy| rgba(x, y + dy).iter().take(3).any(|c| *c > 150));
+        assert!(lit(top - 1), "ink at the top (row {top})");
+        assert!(!lit(mid - 1), "nothing between (row {mid})");
+        assert!(lit(bottom - 1), "ink at the bottom (row {bottom})");
+    }
+
     /// "Top stays top": the stroke at y = 10 lands in the top rows of the PNG, the rectangle below it.
     #[test]
     fn png_renders_the_svg_the_right_way_up() {
@@ -220,5 +362,79 @@ mod tests {
             "blue rect edge below: {bottom:?}"
         );
         assert_eq!(at(86, 40).alpha(), 0, "transparent between");
+    }
+
+    #[test]
+    fn jpeg_is_opaque_and_the_right_way_up() {
+        let svg = svg(&doc(), Some([0.0, 0.0, 0.0, 1.0])).unwrap();
+        let bytes = jpeg(&svg, 2.0).unwrap();
+        let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(img.dimensions(), (172, 110));
+        // World y 10 → row 6, y 40 (between) → row 66, y 60 → row 106.
+        assert_top_stays_top(|x, y| img.get_pixel(x, y).0, 6, 66, 106, 86);
+    }
+
+    /// The PDF, rasterised by poppler (`pdftoppm`, as PDF viewers on Linux use), is the right way up.
+    /// Skipped without poppler.
+    #[test]
+    fn pdf_is_the_right_way_up_in_a_real_pdf_renderer() {
+        let pdf = pdf(&svg(&doc(), Some([0.0, 0.0, 0.0, 1.0])).unwrap()).unwrap();
+        assert!(pdf.starts_with(b"%PDF-"));
+        let dir = std::env::temp_dir().join(format!("nc-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("t.pdf"), &pdf).unwrap();
+        // 144 dpi = 2 px per pt, like the PNG test.
+        let ran = std::process::Command::new("pdftoppm")
+            .args(["-png", "-r", "144", "-singlefile"])
+            .arg(dir.join("t.pdf"))
+            .arg(dir.join("t"))
+            .status();
+        let Ok(status) = ran else {
+            eprintln!("pdftoppm not installed; skipping the PDF raster check");
+            return;
+        };
+        assert!(status.success());
+        let png =
+            tiny_skia::Pixmap::decode_png(&std::fs::read(dir.join("t.png")).unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((png.width(), png.height()), (172, 110));
+        assert_top_stays_top(
+            |x, y| {
+                let p = png.pixel(x, y).unwrap();
+                [p.red(), p.green(), p.blue(), p.alpha()]
+            },
+            6,
+            66,
+            106,
+            86,
+        );
+    }
+
+    /// The wireframe export is the right way up too.
+    #[test]
+    fn wireframe_png_is_the_right_way_up() {
+        let w = wire();
+        let svg = wireframe_svg(&w, Some([0.0, 0.0, 0.0, 1.0])).unwrap();
+        let png = tiny_skia::Pixmap::decode_png(&png(&svg, 2.0).unwrap()).unwrap();
+        // Bounds grow by the wireframe line width (2) instead of 1: world y → row (y − 6) × 2.
+        let y0 = w
+            .shapes
+            .iter()
+            .map(|s| s.bounds.y0)
+            .fold(f64::MAX, f64::min)
+            - 3.0;
+        let row = |y: f64| ((y - y0) * 2.0) as u32;
+        assert_top_stays_top(
+            |x, y| {
+                let p = png.pixel(x, y).unwrap();
+                [p.red(), p.green(), p.blue(), p.alpha()]
+            },
+            row(10.0),
+            row(40.0),
+            row(60.0),
+            png.width() / 2,
+        );
     }
 }

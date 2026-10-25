@@ -80,8 +80,25 @@ Risks taken on, resolved by the Phase 0 spike ([`reports/phase-0.md`](reports/ph
 - **Frame scheduler:** frames whose work exceeds twice the running average plus 1 ms do not tune the
   phase (a slow one-off frame is not a late phase).
 
+### Phase 4 decisions (2026-10-25, [`reports/phase-4.md`](reports/phase-4.md))
+
+- **`ShapeType`:** the Swift app's 15 cases; Rectangle, RoundedRectangle, Circle, Ellipse, Line, Arrow,
+  Unknown appended after the original 8 (owner decision; append-only keeps stored blobs readable).
+- **Fixtures:** scripted hand-like drawings recorded through the real app (owner decision): a tuning
+  set (seed 4) and a held-out set (seed 5), 60 each. Accuracy is asserted on both. The Swift heuristics
+  are kept as a port (`recognize::swift`) and scored as the baseline (51.7 % held out, ours 96.7 %).
+- **The wireframe is derived data:** recomputed off-thread for the current revision while visible,
+  never stored and never in undo; stale results are dropped. Editing it is Phase 5.
+- **One drawing source:** canvas overlay and wireframe export both draw from `recognize::draw` marks.
+- **Semantics changed from Swift:** an image is a box with an X (an empty square is a rectangle); a
+  single label's position decides button (centred) vs input (left).
+- **Export:** SVG is the source; PDF via `svg2pdf`, PNG/JPEG via `resvg` (pinned to 0.45 to share
+  `usvg`). Ctrl+E / Ctrl+Shift+E write all four to `~/Pictures/NeuralCanvas/` until the Phase 5 dialog.
+- **Worker threads run at `SCHED_IDLE`:** recognition, export and clipboard never compete with the
+  canvas.
+
 **Crates (name the library, don't hand-roll):** `glam` (math), `kurbo` (curves, flattening),
-`rstar` (R-tree hit-test/culling), `bytemuck` (`#[repr(C)]` + `Pod` GPU structs), `rusqlite` (bundled,
+`rstar` (R-tree hit-test/culling), `ramer_douglas_peucker` (RDP), `bytemuck` (`#[repr(C)]` + `Pod` GPU structs), `rusqlite` (bundled,
 WAL) + `serde` + `postcard` + `uuid` (persistence), `rayon` (workers), `crossbeam-channel`,
 `resvg`/`usvg` (PNG export), `svg2pdf` (PDF export), `image` (JPEG, screenshot import),
 `kmeans_colors` + `imageproc` (style mirror), `tracy-client` behind a non-default cargo feature (profiling),
@@ -109,7 +126,7 @@ crates/
   spike-iced/  Phase 0 iced 0.14 host spike, kept as the rerun harness for the shell decision.
 packaging/     PKGBUILD, PKGBUILD-bin, .desktop, metainfo.xml, icons, AppImage recipe.
 ```
-Present after Phase 3: `nc-core`, `nc-render`, `nc-store`, `nc-export` (SVG + PNG; PDF in Phase 4), `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`.
+Present after Phase 4: `nc-core` (with `recognize`), `nc-render`, `nc-store`, `nc-export` (SVG, PDF, PNG, JPEG; raw and wireframe), `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`.
 
 **Coordinates (one convention, everywhere):** world space is y-down, origin top-left, 1 unit = 1 logical px
 at 100%. `screen = world * scale + offset`. Matches Wayland, SVG, PDF and PNG; the only flip is world→clip in

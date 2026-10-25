@@ -17,9 +17,12 @@ struct ViewUniform {
     scale: f32,
     px_per_pt: f32,
     size: [f32; 2],
-    _pad: [f32; 2],
-    /// Affine for lifted segments, kurbo order (a b c d) then (e f, padding).
-    lift: [f32; 8],
+    /// Top-left of the pane being drawn, physical px (side-by-side draws two panes).
+    origin: [f32; 2],
+    /// Affine for lifted segments, kurbo coefficient order.
+    lift: [f32; 6],
+    /// Opacity of the raw sketch and of the wireframe.
+    alpha: [f32; 2],
 }
 
 #[repr(C)]
@@ -29,8 +32,8 @@ pub struct SegmentInstance {
     pub b: [f32; 2],
     pub half_width: f32,
     pub color: [f32; 4],
-    /// 1: part of the lifted selection, drawn through the lift transform.
-    pub lifted: u32,
+    /// [`LIFTED`], [`WIRE`] or [`CHROME`]; 0 for ordinary ink.
+    pub flags: u32,
 }
 
 // Offsets come from the compiler, never hand-typed (Mac bug #8: wrong vertex attribute offset).
@@ -57,7 +60,7 @@ const SEGMENT_ATTRS: [wgpu::VertexAttribute; 5] = [
     },
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Uint32,
-        offset: offset_of!(SegmentInstance, lifted) as u64,
+        offset: offset_of!(SegmentInstance, flags) as u64,
         shader_location: 4,
     },
 ];
@@ -77,6 +80,38 @@ pub struct LiveStroke<'a> {
     pub stroke: &'a Stroke,
 }
 
+/// Part of the lifted selection: drawn through the lift transform.
+pub const LIFTED: u32 = 1;
+/// Part of the wireframe: drawn at the wireframe's opacity, not the sketch's.
+pub const WIRE: u32 = 2;
+/// The live stroke and the overlay: always fully opaque.
+pub const CHROME: u32 = 4;
+
+/// How much of the raw sketch and of the wireframe to show, 0..=1 each.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Blend {
+    pub raw: f32,
+    pub wire: f32,
+}
+
+impl Blend {
+    pub const RAW: Self = Self {
+        raw: 1.0,
+        wire: 0.0,
+    };
+    pub const WIRE: Self = Self {
+        raw: 0.0,
+        wire: 1.0,
+    };
+}
+
+/// The wireframe overlay's capsules. `serial` changes whenever they do, so they upload once.
+#[derive(Clone, Copy)]
+pub struct WireLayer<'a> {
+    pub serial: u64,
+    pub segments: &'a [Segment],
+}
+
 /// Elements being moved or resized: drawn where `transform` puts them, while the document still holds
 /// them where they were at the press. Only the uniform changes per frame, however many are lifted.
 #[derive(Clone, Copy)]
@@ -91,6 +126,10 @@ pub struct Scene<'a> {
     pub doc: &'a Document,
     pub live: Option<LiveStroke<'a>>,
     pub lifted: Option<Lifted<'a>>,
+    pub wire: Option<WireLayer<'a>>,
+    pub blend: Blend,
+    /// Raw sketch on the left half, wireframe on the right, same view in each.
+    pub split: bool,
     /// World-space chrome and predicted ink, on top.
     pub overlay: &'a [Segment],
 }
@@ -101,6 +140,9 @@ impl<'a> Scene<'a> {
             doc,
             live: None,
             lifted: None,
+            wire: None,
+            blend: Blend::RAW,
+            split: false,
             overlay: &[],
         }
     }
@@ -137,8 +179,8 @@ const MAX_RUNS: usize = 64;
 const MIN_ARENA: u32 = 4096;
 
 pub struct Renderer {
-    uniform: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    /// One view uniform per pane: side-by-side draws the scene twice.
+    panes: [(wgpu::Buffer, wgpu::BindGroup); 2],
     grid: wgpu::RenderPipeline,
     strokes: wgpu::RenderPipeline,
     /// Every committed stroke's segments, one contiguous range per stroke.
@@ -161,6 +203,10 @@ pub struct Renderer {
     overlay: wgpu::Buffer,
     overlay_capacity: u32,
     overlay_len: u32,
+    wire: wgpu::Buffer,
+    wire_capacity: u32,
+    wire_len: u32,
+    wire_serial: Option<u64>,
     scratch: Vec<SegmentInstance>,
 }
 
@@ -170,17 +216,21 @@ fn instance(s: Segment) -> SegmentInstance {
         b: s.b.to_array(),
         half_width: s.half_width,
         color: s.color,
-        lifted: 0,
+        flags: 0,
+    }
+}
+
+fn flagged(flags: u32) -> impl Fn(Segment) -> SegmentInstance {
+    move |s| SegmentInstance {
+        flags,
+        ..instance(s)
     }
 }
 
 /// Appends the element's capsules, flagged as part of the lifted selection or not.
 fn push_instances(out: &mut Vec<SegmentInstance>, element: &Element, lifted: bool) {
     element_segments(element, |s| {
-        out.push(SegmentInstance {
-            lifted: lifted as u32,
-            ..instance(s)
-        })
+        out.push(flagged(if lifted { LIFTED } else { 0 })(s))
     });
 }
 
@@ -196,12 +246,6 @@ const STRIDE: u64 = size_of::<SegmentInstance>() as u64;
 impl Renderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("canvas.wgsl"));
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("view"),
-            size: size_of::<ViewUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("view"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -215,14 +259,24 @@ impl Renderer {
                 count: None,
             }],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("view"),
-            layout: &bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            }],
-        });
+        let pane = || {
+            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("view"),
+                size: size_of::<ViewUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("view"),
+                layout: &bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                }],
+            });
+            (uniform, bind_group)
+        };
+        let panes = [pane(), pane()];
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("canvas"),
             bind_group_layouts: &[Some(&bgl)],
@@ -268,8 +322,7 @@ impl Renderer {
             Some(wgpu::BlendState::ALPHA_BLENDING),
         );
         Self {
-            uniform,
-            bind_group,
+            panes,
             grid,
             strokes,
             arena: Self::instance_buffer(device, MIN_ARENA),
@@ -289,6 +342,10 @@ impl Renderer {
             overlay: Self::instance_buffer(device, 256),
             overlay_capacity: 256,
             overlay_len: 0,
+            wire: Self::instance_buffer(device, 1024),
+            wire_capacity: 1024,
+            wire_len: 0,
+            wire_serial: None,
             scratch: Vec::new(),
         }
     }
@@ -460,7 +517,7 @@ impl Renderer {
         let from = self.live_len.saturating_sub(1).min(total);
         self.scratch.clear();
         self.scratch
-            .extend(stroke_segments_from(live.stroke, from as usize).map(instance));
+            .extend(stroke_segments_from(live.stroke, from as usize).map(flagged(CHROME)));
         if !self.scratch.is_empty() {
             queue.write_buffer(
                 &self.live,
@@ -479,11 +536,36 @@ impl Renderer {
             self.overlay = Self::instance_buffer(device, self.overlay_capacity);
         }
         self.scratch.clear();
-        self.scratch.extend(overlay.iter().copied().map(instance));
+        self.scratch
+            .extend(overlay.iter().copied().map(flagged(CHROME)));
         if n > 0 {
             queue.write_buffer(&self.overlay, 0, bytemuck::cast_slice(&self.scratch));
         }
         self.overlay_len = n;
+    }
+
+    fn sync_wire(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, wire: Option<WireLayer>) {
+        let Some(wire) = wire else {
+            self.wire_len = 0;
+            self.wire_serial = None;
+            return;
+        };
+        if self.wire_serial == Some(wire.serial) {
+            return;
+        }
+        let n = wire.segments.len() as u32;
+        if n > self.wire_capacity {
+            self.wire_capacity = n.next_power_of_two();
+            self.wire = Self::instance_buffer(device, self.wire_capacity);
+        }
+        self.scratch.clear();
+        self.scratch
+            .extend(wire.segments.iter().copied().map(flagged(WIRE)));
+        if n > 0 {
+            queue.write_buffer(&self.wire, 0, bytemuck::cast_slice(&self.scratch));
+        }
+        self.wire_len = n;
+        self.wire_serial = Some(wire.serial);
     }
 
     /// Draws the grid and `scene` into `target`. `size` is logical px; `px_per_pt` the surface scale
@@ -505,20 +587,34 @@ impl Renderer {
         self.sync(device, queue, scene.doc, scene.lifted.map(|l| l.ids));
         self.sync_live(device, queue, scene.live);
         self.sync_overlay(device, queue, scene.overlay);
-        let [a, b, c, d, e, f] = scene
+        self.sync_wire(device, queue, scene.wire);
+        let lift = scene
             .lifted
             .map_or(Affine::IDENTITY, |l| l.transform)
             .as_coeffs()
             .map(|v| v as f32);
-        let u = ViewUniform {
-            offset: viewport.offset.to_array(),
-            scale: viewport.scale,
-            px_per_pt,
-            size,
-            _pad: [0.0; 2],
-            lift: [a, b, c, d, e, f, 0.0, 0.0],
+        // Side by side: the same view in each half, raw sketch left, wireframe right.
+        let half = [size[0] / 2.0, size[1]];
+        let panes: &[([f32; 2], [f32; 2], Blend)] = if scene.split {
+            &[
+                ([0.0, 0.0], half, Blend::RAW),
+                ([half[0], 0.0], half, Blend::WIRE),
+            ]
+        } else {
+            &[([0.0, 0.0], size, scene.blend)]
         };
-        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
+        for (i, (origin, pane_size, blend)) in panes.iter().enumerate() {
+            let u = ViewUniform {
+                offset: viewport.offset.to_array(),
+                scale: viewport.scale,
+                px_per_pt,
+                size: *pane_size,
+                origin: origin.map(|v| v * px_per_pt),
+                lift,
+                alpha: [blend.raw, blend.wire],
+            };
+            queue.write_buffer(&self.panes[i].0, 0, bytemuck::bytes_of(&u));
+        }
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("canvas"),
@@ -533,23 +629,31 @@ impl Renderer {
             })],
             ..Default::default()
         });
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_pipeline(&self.grid);
-        pass.draw(0..3, 0..1);
-        pass.set_pipeline(&self.strokes);
-        if !self.runs.is_empty() {
-            pass.set_vertex_buffer(0, self.arena.slice(..));
-            for run in &self.runs {
-                pass.draw(0..6, run.clone());
+        for (i, (origin, pane_size, _)) in panes.iter().enumerate() {
+            let (x, y) = (origin[0] * px_per_pt, origin[1] * px_per_pt);
+            let (w, h) = (pane_size[0] * px_per_pt, pane_size[1] * px_per_pt);
+            pass.set_viewport(x, y, w, h, 0.0, 1.0);
+            pass.set_scissor_rect(x as u32, y as u32, w.round() as u32, h.round() as u32);
+            pass.set_bind_group(0, &self.panes[i].1, &[]);
+            pass.set_pipeline(&self.grid);
+            pass.draw(0..3, 0..1);
+            pass.set_pipeline(&self.strokes);
+            if !self.runs.is_empty() {
+                pass.set_vertex_buffer(0, self.arena.slice(..));
+                for run in &self.runs {
+                    pass.draw(0..6, run.clone());
+                }
             }
-        }
-        if self.live_len > 0 {
-            pass.set_vertex_buffer(0, self.live.slice(..));
-            pass.draw(0..6, 0..self.live_len);
-        }
-        if self.overlay_len > 0 {
-            pass.set_vertex_buffer(0, self.overlay.slice(..));
-            pass.draw(0..6, 0..self.overlay_len);
+            for (buffer, len) in [
+                (&self.wire, self.wire_len),
+                (&self.live, self.live_len),
+                (&self.overlay, self.overlay_len),
+            ] {
+                if len > 0 {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..6, 0..len);
+                }
+            }
         }
     }
 }

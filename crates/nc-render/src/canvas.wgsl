@@ -4,15 +4,21 @@ struct View {
     offset: vec2f,     // logical px
     scale: f32,        // zoom
     px_per_pt: f32,    // surface scale factor (fractional on Wayland)
-    size: vec2f,       // logical px
-    _pad: vec2f,
+    size: vec2f,       // logical px, of the pane being drawn
+    origin: vec2f,     // the pane's top-left, physical px (side-by-side has two panes)
     lift_abcd: vec4f,  // affine for lifted segments (a selection being moved), kurbo coefficient order
-    lift_ef: vec4f,
+    lift_ef: vec2f,
+    alpha: vec2f,      // opacity of the raw sketch and of the wireframe
 }
+
+// SegmentInstance.flags
+const LIFTED: u32 = 1u;
+const WIRE: u32 = 2u;
+const CHROME: u32 = 4u;
 
 fn lift(p: vec2f) -> vec2f {
     let m = view.lift_abcd;
-    return vec2f(m.x * p.x + m.z * p.y, m.y * p.x + m.w * p.y) + view.lift_ef.xy;
+    return vec2f(m.x * p.x + m.z * p.y, m.y * p.x + m.w * p.y) + view.lift_ef;
 }
 @group(0) @binding(0) var<uniform> view: View;
 
@@ -34,7 +40,7 @@ fn grid_line(world: vec2f, spacing: f32) -> f32 {
 }
 
 @fragment fn fs_grid(@builtin(position) frag: vec4f) -> @location(0) vec4f {
-    let world = (frag.xy / view.px_per_pt - view.offset) / view.scale;
+    let world = ((frag.xy - view.origin) / view.px_per_pt - view.offset) / view.scale;
     let level = log2(view.scale) / 2.0;           // spacing steps by 4x per level
     let spacing = 32.0 / pow(4.0, floor(level));
     let fade = 1.0 - fract(level);                // minor lines fade out as they get dense
@@ -52,7 +58,7 @@ struct Seg {
     @location(1) b: vec2f,
     @location(2) half_width: f32,
     @location(3) color: vec4f,
-    @location(4) lifted: u32,
+    @location(4) flags: u32,
 }
 
 struct SegOut {
@@ -73,7 +79,7 @@ struct SegOut {
     let hw = max(s.half_width, 0.5 * px_world);   // never thinner than a device hairline
     var sa = s.a;
     var sb = s.b;
-    if s.lifted == 1u {
+    if (s.flags & LIFTED) != 0u {
         sa = lift(sa);
         sb = lift(sb);
     }
@@ -91,7 +97,13 @@ struct SegOut {
     o.a = sa;
     o.b = sb;
     o.half_width = hw;
-    o.color = s.color;
+    var layer = view.alpha.x;
+    if (s.flags & WIRE) != 0u {
+        layer = view.alpha.y;
+    } else if (s.flags & CHROME) != 0u {
+        layer = 1.0;
+    }
+    o.color = vec4f(s.color.rgb, s.color.a * layer);
     return o;
 }
 

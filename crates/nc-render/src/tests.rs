@@ -331,6 +331,72 @@ fn shapes_overlay_and_moves() {
     );
 }
 
+/// The wireframe layer fades against the raw sketch, and side by side shows each in its own half.
+#[test]
+fn wireframe_blend_and_side_by_side() {
+    let Some(gpu) = Gpu::new() else { return };
+    // Raw ink: a red horizontal stroke at y = 16. Wireframe: a blue one at y = 48. Both span x 4..60.
+    let doc = Document::from_elements([stroke(
+        Vec2::new(4.0, 16.0),
+        Vec2::new(60.0, 16.0),
+        6.0,
+        RED,
+    )]);
+    let wire = [Segment {
+        a: Vec2::new(4.0, 48.0),
+        b: Vec2::new(60.0, 48.0),
+        half_width: 3.0,
+        color: BLUE,
+    }];
+    let mut r = Renderer::new(&gpu.device, FORMAT);
+    let v = Viewport::default();
+    let frame = |r: &mut Renderer, blend, split| {
+        let scene = Scene {
+            wire: Some(WireLayer {
+                serial: 1,
+                segments: &wire,
+            }),
+            blend,
+            split,
+            ..Scene::doc(&doc)
+        };
+        gpu.frame_with(r, &scene, &v, 64, 1.0)
+    };
+    let raw = frame(&mut r, Blend::RAW, false);
+    assert!(
+        raw.at(32, 16)[0] > 240 && raw.at(32, 48)[2] < 80,
+        "raw only"
+    );
+    let both = frame(
+        &mut r,
+        Blend {
+            raw: 1.0,
+            wire: 1.0,
+        },
+        false,
+    );
+    assert!(
+        both.at(32, 16)[0] > 240 && both.at(32, 48)[2] > 240,
+        "hybrid"
+    );
+    let wire_only = frame(&mut r, Blend::WIRE, false);
+    assert!(
+        wire_only.at(32, 16)[0] < 80 && wire_only.at(32, 48)[2] > 240,
+        "wireframe only"
+    );
+
+    // Side by side: each 32 px half shows world x 0..32. Raw left, wireframe right.
+    let split = frame(&mut r, Blend::RAW, true);
+    assert!(
+        split.at(16, 16)[0] > 240 && split.at(16, 48)[2] < 80,
+        "left: raw"
+    );
+    assert!(
+        split.at(48, 48)[2] > 240 && split.at(48, 16)[0] < 80,
+        "right: wireframe"
+    );
+}
+
 /// The live stroke uploads only its new tail, and a new stroke starts over.
 #[test]
 fn live_stroke_uploads_only_its_tail() {

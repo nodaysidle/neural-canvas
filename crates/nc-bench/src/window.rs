@@ -48,6 +48,9 @@ pub struct Config {
     pub present_mode: wgpu::PresentMode,
     pub secs: f64,
     pub latch: Latch,
+    /// Keep a worker thread recognising S2k back to back for the whole run, as the app's
+    /// recognition thread would under constant edits.
+    pub recognize: bool,
 }
 
 const WARMUP: Duration = Duration::from_secs(1);
@@ -121,6 +124,26 @@ struct Moving {
 
 pub fn run(cfg: Config) {
     let event_loop = EventLoop::new().expect("event loop");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let recognizer = cfg.recognize.then(|| {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            // As the app's worker threads do: run only on CPU time nothing else wants.
+            // SAFETY: a plain syscall on the calling thread with a valid parameter.
+            unsafe {
+                let param = libc::sched_param { sched_priority: 0 };
+                libc::sched_setscheduler(0, libc::SCHED_IDLE, &param);
+            }
+            let elements = scene::s2k(1).elements().to_vec();
+            let mut ms = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let t = Instant::now();
+                std::hint::black_box(nc_core::recognize::recognize(&elements));
+                ms.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            ms
+        })
+    });
     let mut bench = Bench {
         doc: scene::s2k(1),
         live: None,
@@ -166,6 +189,13 @@ pub fn run(cfg: Config) {
         });
     }
     event_loop.run_app(&mut bench).expect("run app");
+    if let Some(worker) = recognizer {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let ms = worker.join().expect("recognition thread");
+        if let Some(s) = Summary::of(&ms) {
+            println!("recognition of S2k on a worker, back to back: {s}");
+        }
+    }
 }
 
 impl Gpu {

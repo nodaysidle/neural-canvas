@@ -17,7 +17,7 @@
   - `crates/nc-core`: Document model, stroke geometry, viewport transform math. Strictly NO GPU, NO windowing types.
   - `crates/nc-render`: `wgpu` canvas renderer (grid + instanced SDF capsule strokes via `canvas.wgsl`). Offscreen-tested.
   - `crates/nc-store`: SQLite (WAL) persistence on a dedicated store thread: one row per element, 300 ms debounce, schema migrations.
-  - `crates/nc-export`: SVG writer (single source of truth) and PNG via `resvg`; PDF/JPEG in Phase 4.
+  - `crates/nc-export`: SVG writer (single source of truth) for the raw sketch and the wireframe; PDF via `svg2pdf`, PNG/JPEG via `resvg`.
   - `crates/nc-wayland`: side channel on winit's `wl_display` (presentation feedback, tablet-v2). Never reads the socket itself.
   - `crates/nc-app`: `neuralcanvas` binary (winit window, wgpu surface, event pump, input -> core -> render).
 

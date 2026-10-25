@@ -8,6 +8,8 @@ use nc_core::{Rect, Segment, Viewport};
 /// The one accent colour (linear RGB).
 pub const ACCENT: [f32; 4] = [0.15, 0.42, 1.0, 1.0];
 const HANDLE_FILL: [f32; 4] = [0.92, 0.94, 1.0, 1.0];
+/// Quiet chrome: a little brighter than the grid's major lines.
+const DIVIDER: [f32; 4] = [0.08, 0.09, 0.12, 1.0];
 /// Outline half width, logical px.
 const LINE: f32 = 0.6;
 
@@ -35,6 +37,34 @@ pub fn polyline(out: &mut Vec<Segment>, points: &[Vec2], closed: bool, view: &Vi
 
 pub fn rect(out: &mut Vec<Segment>, r: Rect, view: &Viewport) {
     polyline(out, &corners(r), false, view);
+}
+
+/// The element "Review uncertain items" is showing: a thicker amber box a little outside it.
+pub fn highlight(out: &mut Vec<Segment>, r: Rect, view: &Viewport) {
+    let pad = 6.0 / view.scale as f64;
+    let half_width = 1.5 / view.scale;
+    let c = corners(r.inflate(pad, pad));
+    out.extend(c.windows(2).map(|w| Segment {
+        a: w[0],
+        b: w[1],
+        half_width,
+        color: nc_core::recognize::draw::UNCERTAIN,
+    }));
+}
+
+/// Side by side: a hairline down the left pane's right edge (the right pane clips it away).
+pub fn pane_divider(out: &mut Vec<Segment>, pane: Vec2, view: &Viewport) {
+    let x = view.screen_to_world(Vec2::new(pane.x, 0.0)).x;
+    let (top, bottom) = (
+        view.screen_to_world(Vec2::ZERO).y,
+        view.screen_to_world(pane).y,
+    );
+    out.push(Segment {
+        a: Vec2::new(x, top),
+        b: Vec2::new(x, bottom),
+        half_width: 1.0 / view.scale,
+        color: DIVIDER,
+    });
 }
 
 /// The selection box with its eight handles (accent ring, light centre).

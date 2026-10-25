@@ -14,6 +14,7 @@
 //! ```
 
 mod drive;
+mod fixtures;
 mod offscreen;
 mod samples;
 mod store;
@@ -52,9 +53,52 @@ fn main() {
                     Some("auto") => Latch::Adaptive,
                     _ => Latch::Fixed(std::time::Duration::from_secs_f64(secs(4, 0.0) / 1e3)),
                 },
+                recognize: arg(5) == Some("recognize"),
             });
         }
+        Some("recognize") => {
+            // Recognition of S2k (budget: ≤ 300 ms on the worker), 10 runs.
+            let doc = nc_core::scene::s2k(1);
+            let mut ms = Vec::new();
+            let mut wire = None;
+            for _ in 0..10 {
+                let t = std::time::Instant::now();
+                wire = Some(nc_core::recognize::recognize(doc.elements()));
+                ms.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let wire = wire.expect("ran");
+            println!(
+                "S2k ({} elements): {}",
+                doc.elements().len(),
+                nc_bench::stats::Summary::of(&ms).expect("10 runs")
+            );
+            println!(
+                "{} shapes, status {:?}, {:?}",
+                wire.shapes.len(),
+                wire.report.status(),
+                wire.report
+            );
+        }
         Some("samples") => samples::run(1_000_000),
+        Some("fixtures") => match arg(1) {
+            Some("pages") => println!("{}", fixtures::pages()),
+            Some("script") => fixtures::script(
+                arg(2)
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or_else(|| usage()),
+                arg(3)
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or_else(|| usage()),
+                glam::Vec2::new(secs(4, 0.0) as f32, secs(5, 0.0) as f32),
+                arg(6).unwrap_or_else(|| usage()).as_ref(),
+            ),
+            Some("extract") => fixtures::extract(
+                arg(2).unwrap_or_else(|| usage()).as_ref(),
+                arg(3).unwrap_or_else(|| usage()).as_ref(),
+                arg(4).unwrap_or_else(|| usage()).as_ref(),
+            ),
+            _ => usage(),
+        },
         Some("drive") if arg(1) == Some("script") => drive::script(std::io::stdin().lock()),
         Some("drive") => drive::run(secs(1, 10.0), secs(2, 500.0), arg(3) == Some("strokes")),
         Some("store") => match arg(1) {
@@ -66,6 +110,7 @@ fn main() {
             present_mode: wgpu::PresentMode::Fifo,
             secs: secs(1, 15.0),
             latch: Latch::Fixed(std::time::Duration::ZERO),
+            recognize: false,
         }),
         _ => usage(),
     }
@@ -73,7 +118,7 @@ fn main() {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: nc-bench offscreen [frames]\n       nc-bench window <panzoom|draw|move|input> <fifo|mailbox|immediate> [secs] [auto|late_ms]\n       nc-bench tablet [secs]\n       nc-bench drive <secs> [hz] [strokes] | script < commands\n       nc-bench samples\n       nc-bench store [dir]"
+        "usage: nc-bench offscreen [frames]\n       nc-bench window <panzoom|draw|move|input> <fifo|mailbox|immediate> [secs] [auto|late_ms] [recognize]\n       nc-bench tablet [secs]\n       nc-bench drive <secs> [hz] [strokes] | script < commands\n       nc-bench fixtures <pages | script SEED PAGE X Y MANIFEST | extract MANIFEST DB DIR>\n       nc-bench recognize\n       nc-bench samples\n       nc-bench store [dir]"
     );
     std::process::exit(2);
 }

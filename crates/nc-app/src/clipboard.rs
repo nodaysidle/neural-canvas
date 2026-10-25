@@ -30,6 +30,7 @@ impl Clipboard {
         std::thread::Builder::new()
             .name("clipboard".into())
             .spawn(move || {
+                crate::workers::idle_priority();
                 for request in rx {
                     let event = match request {
                         Request::Copy(elements) => match copy_out(&elements, background) {

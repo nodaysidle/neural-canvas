@@ -5,20 +5,24 @@ use crate::UserEvent;
 use crate::chrome;
 use crate::clipboard::Clipboard;
 use crate::gpu::Gpu;
+use crate::workers::{Exporter, Recognizer};
 use glam::Vec2;
 use nc_core::document::stroke_segments;
 use nc_core::kurbo::Affine;
+use nc_core::recognize::{Wireframe, draw};
 use nc_core::select::{self, Gesture, Handle};
 use nc_core::{
     Action, Command, Element, ElementId, ElementKind, FrameScheduler, Key as CoreKey, Predictor,
     Rect, Segment, Session, ShapeKind, Shortcut, Smoother, Stroke, Tool, Tools, ViewAnimation,
     Viewport, hit, shape,
 };
-use nc_render::{Lifted, LiveStroke, Scene};
+use nc_render::{Blend, Lifted, LiveStroke, Scene, WireLayer};
 use nc_store::{Store, StoreEvent};
 use nc_wayland::{Presented, SideChannel, ToolFrame, ToolKind, mono_ns};
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
@@ -36,6 +40,9 @@ const ERASER_RADIUS: f32 = 8.0;
 const PICK_TOLERANCE: f32 = 4.0;
 /// Where Duplicate puts the copy, logical px down and right.
 const DUPLICATE_OFFSET: f32 = 16.0;
+/// Room around an uncertain item when reviewing it, logical px, and the closest zoom it gets.
+const REVIEW_PADDING: f32 = 120.0;
+const REVIEW_MAX_ZOOM: f32 = 2.0;
 /// Refresh period until presentation feedback reports the real one.
 const DEFAULT_REFRESH: f64 = 1.0 / 120.0;
 /// Points reserved per live stroke, so the hot input path does not reallocate (a few seconds of 1 kHz
@@ -93,8 +100,23 @@ pub struct App {
     /// Chrome and predicted ink for the frame being drawn; reused so frames do not allocate.
     overlay: Vec<Segment>,
     clipboard: Clipboard,
-    /// A clipboard problem, shown until the next clipboard action.
-    clipboard_error: Option<String>,
+    /// A clipboard or export result, shown until the next clipboard or export action.
+    notice: Option<String>,
+    recognizer: Recognizer,
+    exporter: Exporter,
+    /// 0 = raw sketch only, 0.5 = both, 1 = wireframe only.
+    wire_level: f32,
+    /// Raw sketch and wireframe side by side.
+    split: bool,
+    /// The newest wireframe for the current revision, and its capsules.
+    wireframe: Option<Arc<Wireframe>>,
+    wire_segments: Vec<Segment>,
+    wire_serial: u64,
+    /// Revision last sent for recognition.
+    requested: Option<u64>,
+    /// "Review uncertain items": how many were visited, and the one shown.
+    reviewed: usize,
+    reviewing: Option<Rect>,
     eraser_cursor: Option<CustomCursor>,
     /// Logical px.
     cursor: Vec2,
@@ -143,8 +165,18 @@ impl App {
             lifted: HashSet::new(),
             hover_handle: None,
             overlay: Vec::new(),
-            clipboard: Clipboard::new(proxy, background),
-            clipboard_error: None,
+            clipboard: Clipboard::new(proxy.clone(), background),
+            notice: None,
+            recognizer: Recognizer::new(proxy.clone()),
+            exporter: Exporter::new(proxy, background),
+            wire_level: 0.0,
+            split: false,
+            wireframe: None,
+            wire_segments: Vec::new(),
+            wire_serial: 0,
+            requested: None,
+            reviewed: 0,
+            reviewing: None,
             eraser_cursor: None,
             cursor: Vec2::ZERO,
             last_erase: Vec2::ZERO,
@@ -195,13 +227,117 @@ impl App {
     // shortcut: problems show in the window title until the Phase 5 shell has banners and toasts.
     fn update_title(&self) {
         let Some(g) = &self.gpu else { return };
-        let title = match (&self.save_error, &self.clipboard_error, self.read_only) {
-            (Some(e), _, _) => format!("NeuralCanvas (not saved: {e})"),
-            (None, _, true) => "NeuralCanvas (read-only: this sketch could not be read)".into(),
-            (None, Some(e), false) => format!("NeuralCanvas ({e})"),
-            (None, None, false) => "NeuralCanvas".into(),
+        let mut title = match (&self.save_error, self.read_only) {
+            (Some(e), _) => format!("NeuralCanvas (not saved: {e})"),
+            (None, true) => "NeuralCanvas (read-only: this sketch could not be read)".into(),
+            (None, false) => "NeuralCanvas".into(),
         };
+        if self.wire_visible() {
+            if self.split {
+                title.push_str(" · Side by side");
+            } else {
+                title.push_str(&format!(" · Wireframe {:.0} %", self.wire_level * 100.0));
+            }
+            if let Some(w) = &self.wireframe {
+                title.push_str(&format!(" · {}", w.report.status().display_name()));
+                if w.report.uncertain_count > 0 {
+                    title.push_str(&format!(
+                        " · Review {} uncertain (U)",
+                        w.report.uncertain_count
+                    ));
+                }
+            }
+        }
+        if let Some(n) = &self.notice {
+            title.push_str(&format!(" · {n}"));
+        }
         g.window.set_title(&title);
+    }
+
+    fn wire_visible(&self) -> bool {
+        self.split || self.wire_level > 0.0
+    }
+
+    /// Raw ink fades out as the wireframe fades in; both are fully shown at the halfway point.
+    fn blend(&self) -> Blend {
+        Blend {
+            raw: (2.0 * (1.0 - self.wire_level)).min(1.0),
+            wire: (2.0 * self.wire_level).min(1.0),
+        }
+    }
+
+    fn set_wire(&mut self, level: f32, split: bool) {
+        self.wire_level = level.clamp(0.0, 1.0);
+        self.split = split;
+        self.update_title();
+        self.redraw();
+    }
+
+    /// Pointer px in the pane under it: side by side, the right pane shows the same view as the left.
+    fn to_pane(&self, p: Vec2) -> Vec2 {
+        let half = self.logical_size().x / 2.0;
+        if self.split && p.x >= half {
+            Vec2::new(p.x - half, p.y)
+        } else {
+            p
+        }
+    }
+
+    /// The size of one pane: half the window when side by side.
+    fn pane_size(&self) -> Vec2 {
+        let size = self.logical_size();
+        if self.split {
+            Vec2::new(size.x / 2.0, size.y)
+        } else {
+            size
+        }
+    }
+
+    fn adopt_wireframe(&mut self, sketch: Uuid, revision: u64, wire: Arc<Wireframe>) {
+        // Stale: the sketch changed since. The newer request is already queued.
+        if sketch != self.session.sketch_id || revision != self.session.doc().revision() {
+            return;
+        }
+        self.wire_segments.clear();
+        draw::segments(&wire, &mut self.wire_segments);
+        self.wire_serial += 1;
+        self.wireframe = Some(wire);
+        self.update_title();
+        self.redraw();
+    }
+
+    /// Zooms to the next element the quality gate flagged, in reading order.
+    fn review_uncertain(&mut self) {
+        // Reviewing means comparing what was drawn with what was recognised: show both.
+        if !self.wire_visible() || self.wire_level > 0.5 {
+            self.set_wire(0.5, self.split);
+        }
+        let Some(wire) = &self.wireframe else { return };
+        let mut uncertain: Vec<Rect> = wire
+            .shapes
+            .iter()
+            .filter(|s| s.is_uncertain())
+            .map(|s| s.bounds)
+            .collect();
+        if uncertain.is_empty() {
+            self.reviewing = None;
+            self.set_notice(Some("Nothing uncertain to review".into()));
+            return;
+        }
+        uncertain.sort_by(|a, b| a.y0.total_cmp(&b.y0).then(a.x0.total_cmp(&b.x0)));
+        let target = uncertain[self.reviewed % uncertain.len()];
+        self.reviewed += 1;
+        self.reviewing = Some(target);
+        let mut view = Viewport::fit(target, self.pane_size(), REVIEW_PADDING);
+        if view.scale > REVIEW_MAX_ZOOM {
+            view.zoom_at(self.pane_size() * 0.5, REVIEW_MAX_ZOOM / view.scale);
+        }
+        self.set_notice(Some(format!(
+            "Uncertain item {} of {}",
+            (self.reviewed - 1) % uncertain.len() + 1,
+            uncertain.len()
+        )));
+        self.animate_to(view);
     }
 
     fn world(&self, screen: Vec2) -> Vec2 {
@@ -452,7 +588,7 @@ impl App {
         let mut frames = std::mem::take(&mut self.tablet_frames);
         wl.drain_tool_frames(|f| frames.push(f));
         for f in frames.drain(..) {
-            let pos = Vec2::new(f.position.0 as f32, f.position.1 as f32);
+            let pos = self.to_pane(Vec2::new(f.position.0 as f32, f.position.1 as f32));
             if f.entered {
                 self.tablet_near = true;
                 self.tools.set_stylus_eraser(f.kind == ToolKind::Eraser);
@@ -510,7 +646,10 @@ impl App {
                 self.selection = doc.elements().iter().map(|e| e.id).collect();
                 self.choose_tool(Tool::Select);
             }
-            Action::Deselect => self.selection.clear(),
+            Action::Deselect => {
+                self.selection.clear();
+                self.reviewing = None;
+            }
             Action::Delete => {
                 let edit = select::delete(&self.selection);
                 self.selection.clear();
@@ -524,11 +663,11 @@ impl App {
             }
             Action::Copy => {
                 self.clipboard.copy(select::selected(doc, &self.selection));
-                self.set_clipboard_error(None);
+                self.set_notice(None);
             }
             Action::Paste => {
                 self.clipboard.paste(self.world(self.cursor));
-                self.set_clipboard_error(None);
+                self.set_notice(None);
             }
             Action::Nudge { dx, dy } => {
                 let edit =
@@ -541,22 +680,40 @@ impl App {
                     .doc()
                     .bounds()
                     .map_or(Viewport::default(), |b| {
-                        Viewport::fit(b, self.logical_size(), FIT_PADDING)
+                        Viewport::fit(b, self.pane_size(), FIT_PADDING)
                     });
                 self.animate_to(target);
             }
             Action::ActualSize => {
                 let mut target = self.viewport;
-                target.zoom_at(self.logical_size() * 0.5, 1.0 / target.scale);
+                target.zoom_at(self.pane_size() * 0.5, 1.0 / target.scale);
                 self.animate_to(target);
+            }
+            Action::CycleWireframe => {
+                let next = match self.wire_level {
+                    l if l <= 0.0 => 0.5,
+                    l if l < 1.0 => 1.0,
+                    _ => 0.0,
+                };
+                self.set_wire(next, false);
+            }
+            Action::WireframeOpacity { up } => {
+                let step = if up { 0.1 } else { -0.1 };
+                self.set_wire(((self.wire_level + step) * 10.0).round() / 10.0, false);
+            }
+            Action::SideBySide => self.set_wire(self.wire_level, !self.split),
+            Action::ReviewUncertain => self.review_uncertain(),
+            Action::Export { wireframe } => {
+                self.exporter.export(doc.elements().to_vec(), wireframe);
+                self.set_notice(Some("Exporting…".into()));
             }
         }
         self.redraw();
     }
 
-    fn set_clipboard_error(&mut self, error: Option<String>) {
-        if self.clipboard_error != error {
-            self.clipboard_error = error;
+    fn set_notice(&mut self, notice: Option<String>) {
+        if self.notice != notice {
+            self.notice = notice;
             self.update_title();
         }
     }
@@ -617,6 +774,12 @@ impl App {
                 .map_or(b, |t| t.transform_rect_bbox(b));
             chrome::selection(&mut overlay, b, &view);
         }
+        if let (true, Some(r)) = (self.wire_visible(), self.reviewing) {
+            chrome::highlight(&mut overlay, r, &view);
+        }
+        if self.split {
+            chrome::pane_divider(&mut overlay, self.pane_size(), &view);
+        }
         self.overlay = overlay;
         predicted
     }
@@ -633,7 +796,7 @@ impl App {
             self.viewport,
             target,
             self.now(),
-            self.logical_size(),
+            self.pane_size(),
             self.reduced_motion,
         );
         if self.animation.is_none() {
@@ -691,9 +854,19 @@ impl App {
                 self.animation = None;
             }
         }
+        let doc = self.session.doc();
+        if self.wire_visible() && self.requested != Some(doc.revision()) {
+            self.requested = Some(doc.revision());
+            self.recognizer.request(
+                self.session.sketch_id,
+                doc.revision(),
+                doc.elements().to_vec(),
+            );
+        }
         // A predicted tail must retract once the hand stops: keep drawing until the predictor gives up.
         let predicted = self.build_overlay();
         let lift = self.lift_transform();
+        let (show_wire, blend) = (self.wire_visible(), self.blend());
         let Some(g) = &mut self.gpu else { return };
         let id = self.next_frame;
         let live = self.live.as_ref().map(|stroke| LiveStroke {
@@ -704,10 +877,17 @@ impl App {
             ids: &self.lifted,
             transform,
         });
+        let wire = show_wire.then_some(WireLayer {
+            serial: self.wire_serial,
+            segments: &self.wire_segments,
+        });
         let scene = Scene {
             doc: self.session.doc(),
             live,
             lifted,
+            wire,
+            blend,
+            split: self.split,
             overlay: &self.overlay,
         };
         let wl = &self.wl;
@@ -799,7 +979,16 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ReducedMotion(reduce) => self.reduced_motion = reduce,
             UserEvent::Pasted(elements, centre) => self.pasted(elements, centre),
-            UserEvent::ClipboardFailed(e) => self.set_clipboard_error(Some(e)),
+            UserEvent::ClipboardFailed(e) => self.set_notice(Some(e)),
+            UserEvent::Recognized {
+                sketch,
+                revision,
+                wire,
+            } => self.adopt_wireframe(sketch, revision, wire),
+            UserEvent::Exported(result) => self.set_notice(Some(match result {
+                Ok(base) => format!("Exported {} (SVG, PDF, PNG, JPEG)", base.display()),
+                Err(e) => format!("Export failed: {e}"),
+            })),
             UserEvent::Quit => self.quit(event_loop, true),
         }
     }
@@ -877,7 +1066,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } if !self.tablet_near => {
                 let scale = self.gpu.as_ref().map_or(1.0, |g| g.window.scale_factor());
                 let p = Vec2::new((position.x / scale) as f32, (position.y / scale) as f32);
-                self.motion(p, None);
+                self.motion(self.to_pane(p), None);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;

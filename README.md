@@ -32,7 +32,7 @@ crates/
   nc-core/     document, strokes, viewport maths. No GPU, no window. Unit-tested.
   nc-render/   wgpu renderer: grid + instanced SDF capsule strokes (canvas.wgsl). Offscreen-tested.
   nc-store/    SQLite (WAL) persistence on its own thread: one row per element, 300 ms debounce.
-  nc-export/   SVG writer and PNG (via resvg) for copy and export.
+  nc-export/   SVG writer; PDF (svg2pdf), PNG and JPEG (resvg); raw sketch and wireframe.
   nc-wayland/  Wayland side channel: presentation feedback and tablet (pen pressure, eraser) input.
   nc-bench/    measurement harness (S2k frame pacing, scanout latency, save cost). Never packaged.
   spike-iced/  Phase 0 iced host spike, kept to rerun the shell decision.
