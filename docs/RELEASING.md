@@ -37,7 +37,9 @@ Optional, recommended: a minisign `.minisig` per artefact with the public key in
    (fresh data folder: new project, draw, style from a screenshot, export, close, relaunch, store
    unchanged). Run the AppImage on Arch and on Ubuntu or Fedora.
 7. Draft GitHub Release with artefacts **and** their `.sha256` files. A human publishes.
-8. AUR `pkgver` / `sha256sums` bumped from the published artefacts (`dist/aur/`). Pushing to the AUR
+8. `CHANGELOG.md` gets the version's notes and the artefacts' checksums; it is left out of the source
+   tarball (like the PKGBUILDs and reports), so writing it changes no artefact. Tag that commit.
+9. AUR `pkgver` / `sha256sums` bumped from the published artefacts (`dist/aur/`). Pushing to the AUR
    is outward-facing: ask Alan first.
 
 ## AppImage contents

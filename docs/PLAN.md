@@ -168,7 +168,7 @@ offscreen wgpu renderer, JPEG via `image`.**
 - **Checks in containers:** `packaging/check-arch.sh` (makepkg, namcap, clean pacman install and run)
   and `packaging/check-appimage.sh` (Ubuntu 24.04, Fedora 41), against the host's Wayland session.
   `packaging/smoke.sh` drives the release flow and compares the store before and after a relaunch.
-- **Homepage:** `https://github.com/nodaysidle` until the repository's public name is settled (§9 q2).
+- **Homepage:** `https://github.com/nodaysidle/neural-canvas` (§9 q2, settled at release).
 - **Licence:** `LICENSE` (MIT, as `Cargo.toml` declared); the bundled fonts' OFL texts ship next to it.
 
 ## 2. Architecture
@@ -312,7 +312,7 @@ built in an Ubuntu 24.04 container for glibc reach (`packaging/release.sh`). Eve
 ## 9. Open questions for Alan
 
 1. Amend the PRD: Linux-only, or Linux plus the Mac app on life support?
-2. Repo name/location: this folder as `nodaysidle-neuralcanvas-linux`?
+2. ~~Repo name/location~~: resolved at v0.1.0, `github.com/nodaysidle/neural-canvas`.
 3. Import Mac `CanvasData` JSON, or start fresh?
 4. Which pen tablet is on the reference machine (Wacom/Huion/XP-Pen)?
 5. App id domain: `sh.nodaysidle` or other?

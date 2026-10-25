@@ -5,7 +5,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc='Sketch interface layouts and turn them into wireframes'
 arch=('x86_64')
-url='https://github.com/nodaysidle'
+url='https://github.com/nodaysidle/neural-canvas'
 # The app is MIT; the Manrope and DM Mono fonts built into it are OFL-1.1.
 license=('MIT' 'OFL-1.1')
 # Loaded at run time (dlopen), so namcap can't see them: Wayland, xkbcommon and the Vulkan loader.

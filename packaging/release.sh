@@ -13,8 +13,9 @@ root=$(git rev-parse --show-toplevel)
 cd "$root"
 ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
 rust=$(rustc -V | cut -d' ' -f2)
-# What ships: everything but the PKGBUILDs (they carry the artefacts' checksums) and the reports.
-shipped=(. ':!packaging/arch' ':!docs/reports')
+# What ships: everything but what carries the artefacts' checksums (the PKGBUILDs, the changelog) and
+# the reports.
+shipped=(. ':!packaging/arch' ':!CHANGELOG.md' ':!docs/reports')
 # File times in the archives: the last commit that changed what ships, so a commit that only updates
 # the PKGBUILD checksums or the reports leaves every artefact byte for byte the same.
 mtime=$(git log -1 --format=%ct -- "${shipped[@]}")

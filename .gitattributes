@@ -1,4 +1,5 @@
 .claude export-ignore
 docs/reports export-ignore
+CHANGELOG.md export-ignore
 packaging/arch/PKGBUILD export-ignore
 packaging/arch/PKGBUILD-bin export-ignore

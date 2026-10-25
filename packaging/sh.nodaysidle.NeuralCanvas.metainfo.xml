@@ -22,8 +22,7 @@
       <li>Projects and sketches saved as you draw, on your computer only: no account and no network</li>
     </ul>
   </description>
-  <!-- The developer's page until the Linux repository's public name is settled (docs/PLAN.md §9 q2). -->
-  <url type="homepage">https://github.com/nodaysidle</url>
+  <url type="homepage">https://github.com/nodaysidle/neural-canvas</url>
   <launchable type="desktop-id">sh.nodaysidle.NeuralCanvas.desktop</launchable>
   <provides>
     <binary>neuralcanvas</binary>
