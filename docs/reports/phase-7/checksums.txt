@@ -1,6 +1,6 @@
-dde9d1ae7755d6b5dd687b2397ab51627149df291524c623ab5e95b253a60f83  neuralcanvas-0.1.0.tar.gz
-fb7057de4b11a0cc5defd44fde214e81ac0b831e87bc0acea604da1f3fb6f037  NeuralCanvas-0.1.0-x86_64.AppImage
-12ffa54dfe7cea78333c9467b2e75284ed6dab792e58fff88b8a1c476c786f5e  neuralcanvas-0.1.0-x86_64.tar.zst
+29f21d68ef6cf844db3ba68ee63f6096ad87ae1f6c0ab63373cf17665702830a  neuralcanvas-0.1.0.tar.gz
+80fd1df052b91f46692bbba8b78619a14f2195dd5558940c882caf18f49d2247  NeuralCanvas-0.1.0-x86_64.AppImage
+fbdb856cd370c7a98183c6918dd2a7cc3c4090f5d8365f763be4438009c85660  neuralcanvas-0.1.0-x86_64.tar.zst
 
 $ sha256sum -c *.sha256
 neuralcanvas-0.1.0.tar.gz: OK

@@ -1,15 +1,15 @@
 == neuralcanvas
 ==> Starting prepare()...
 ==> Starting build()...
-    Finished `release` profile [optimized] target(s) in 3m 43s
+    Finished `release` profile [optimized] target(s) in 4m 27s
 ==> Starting check()...
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 57s
-test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 49s
+test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.50s
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.45s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.52s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.38s
 test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -17,7 +17,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ==> Starting package()...
 ==> Leaving fakeroot environment.
-==> Finished making: neuralcanvas 0.1.0-1 (Sun Oct 25 13:30:45 2026)
+==> Finished making: neuralcanvas 0.1.0-1 (Sun Oct 25 14:15:02 2026)
 -- clean install log
     libxcursor: running under X11
     libxi: running under X11
@@ -28,7 +28,7 @@ exit status: 124 (124 = still running when stopped, as expected)
 == neuralcanvas-bin
 ==> Starting package()...
 ==> Leaving fakeroot environment.
-==> Finished making: neuralcanvas-bin 0.1.0-1 (Sun Oct 25 13:30:51 2026)
+==> Finished making: neuralcanvas-bin 0.1.0-1 (Sun Oct 25 14:15:09 2026)
 -- clean install log
     libxcursor: running under X11
     libxi: running under X11

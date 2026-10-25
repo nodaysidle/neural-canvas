@@ -21,15 +21,16 @@ is local: no remote, no push, no AUR upload, no tag, no release.
 
 ## Artefacts
 
-Built from commit `c90ab13`. The binary is compiled once, in ubuntu:24.04 with Rust 1.98.1, and shared
+Built from commit `e98707f` (the v0.1.0 release build; tagged at the commit that adds
+`CHANGELOG.md`, which changes no artefact). The binary is compiled once, in ubuntu:24.04 with Rust 1.98.1, and shared
 by the binary tarball, `neuralcanvas-bin` and the AppImage. It needs glibc 2.39 or newer (Ubuntu
 24.04+, Fedora 40+, Debian 13, Arch).
 
 | Artefact | Size | SHA-256 |
 |---|---|---|
-| `neuralcanvas-0.1.0.tar.gz` (source) | 0.95 MB | `dde9d1ae7755d6b5dd687b2397ab51627149df291524c623ab5e95b253a60f83` |
-| `neuralcanvas-0.1.0-x86_64.tar.zst` (binary) | 6.97 MB | `12ffa54dfe7cea78333c9467b2e75284ed6dab792e58fff88b8a1c476c786f5e` |
-| `NeuralCanvas-0.1.0-x86_64.AppImage` | 9.67 MB | `fb7057de4b11a0cc5defd44fde214e81ac0b831e87bc0acea604da1f3fb6f037` |
+| `neuralcanvas-0.1.0.tar.gz` (source) | 0.95 MB | `29f21d68ef6cf844db3ba68ee63f6096ad87ae1f6c0ab63373cf17665702830a` |
+| `neuralcanvas-0.1.0-x86_64.tar.zst` (binary) | 6.97 MB | `fbdb856cd370c7a98183c6918dd2a7cc3c4090f5d8365f763be4438009c85660` |
+| `NeuralCanvas-0.1.0-x86_64.AppImage` | 9.67 MB | `80fd1df052b91f46692bbba8b78619a14f2195dd5558940c882caf18f49d2247` |
 
 Budgets (PERFORMANCE-BUDGET.md): binary 21.50 MB stripped of 25 MB; AppImage 9.67 MB of 40 MB. The
 packages makepkg built from these: `neuralcanvas` 8.74 MB, `neuralcanvas-bin` 8.88 MB.
@@ -68,8 +69,8 @@ store's digest (every element row, sketch style, preset and project) must match 
 
 | Run | Store after first session | Digest before and after relaunch |
 |---|---|---|
-| Release binary | 2 projects, 3 elements, 1 styled sketch, 1 preset; 8 exports | `89c840e2…` = `89c840e2…` |
-| AppImage | same | `33977112…` = `33977112…` |
+| Release binary | 2 projects, 3 elements, 1 styled sketch, 1 preset; 8 exports | `8da80249…` = `8da80249…` |
+| AppImage | same | `8ce8a3c5…` = `8ce8a3c5…` |
 
 The same flow also passed on each earlier build this phase; the two runs above are on the final
 artefacts.
@@ -90,9 +91,8 @@ artefacts.
   sqlite3_column_type` and the rest); Cargo's profile does its own LTO and strips, so a debug package
   would only hold a broken link (namcap flagged it).
 - **Dependencies** `hicolor-icon-theme` (namcap) and `libgcc` (Arch split it out of `gcc-libs`) added.
-- **Homepage** in the metainfo and PKGBUILDs is `https://github.com/nodaysidle` until the Linux
-  repository's public name is settled (PLAN §9 q2). The vault mentions
-  `github.com/nodaysidle/neuralcanvas` only in an older brief.
+- **Homepage** in the metainfo and PKGBUILDs: `https://github.com/nodaysidle/neural-canvas`, the
+  repository the owner created for the release (settles PLAN §9 q2).
 - **Three fixes after the first release build:** `smoke.sh` left `wl-copy` holding its output pipe
   (a piped run never ended); the source tarball embedded the commit id, and archived from a tree it
   took the current time instead, so its checksum changed with every commit and every build. Fixed by
