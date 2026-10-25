@@ -2,7 +2,8 @@
 //! window surface, offscreen tests and PNG export.
 
 use bytemuck::{Pod, Zeroable};
-use nc_core::{Document, Viewport};
+use nc_core::document::stroke_segments;
+use nc_core::{Document, Segment, Stroke, Viewport};
 use std::mem::{offset_of, size_of};
 
 #[repr(C)]
@@ -64,6 +65,20 @@ pub struct Renderer {
     capacity: u64,
     uploaded: u64,
     generation: u64,
+    /// The stroke being drawn, rewritten every frame from `live_scratch` (no per-frame allocation).
+    live: wgpu::Buffer,
+    live_capacity: u64,
+    live_count: u32,
+    live_scratch: Vec<SegmentInstance>,
+}
+
+fn instance(s: Segment) -> SegmentInstance {
+    SegmentInstance {
+        a: s.a.to_array(),
+        b: s.b.to_array(),
+        half_width: s.half_width,
+        color: s.color,
+    }
 }
 
 impl Renderer {
@@ -150,6 +165,10 @@ impl Renderer {
             capacity,
             uploaded: 0,
             generation: u64::MAX,
+            live: Self::instance_buffer(device, 1024),
+            live_capacity: 1024,
+            live_count: 0,
+            live_scratch: Vec::new(),
         }
     }
 
@@ -168,8 +187,8 @@ impl Renderer {
     fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document) {
         #[cfg(feature = "profile")]
         let _span = tracy_client::span!("Renderer::sync");
-        if doc.generation != self.generation {
-            self.generation = doc.generation;
+        if doc.generation() != self.generation {
+            self.generation = doc.generation();
             self.uploaded = 0;
         }
         let total = doc.segments().count() as u64;
@@ -184,12 +203,7 @@ impl Renderer {
         let tail: Vec<SegmentInstance> = doc
             .segments()
             .skip(self.uploaded as usize)
-            .map(|s| SegmentInstance {
-                a: s.a.to_array(),
-                b: s.b.to_array(),
-                half_width: s.half_width,
-                color: s.color,
-            })
+            .map(instance)
             .collect();
         if !tail.is_empty() {
             let at = self.uploaded * size_of::<SegmentInstance>() as u64;
@@ -198,7 +212,25 @@ impl Renderer {
         self.uploaded = total;
     }
 
-    /// Draws grid + strokes into `target`. `size` is logical px; `px_per_pt` the surface scale factor.
+    fn sync_live(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, live: Option<&Stroke>) {
+        self.live_scratch.clear();
+        if let Some(stroke) = live {
+            self.live_scratch
+                .extend(stroke_segments(stroke).map(instance));
+        }
+        let n = self.live_scratch.len() as u64;
+        if n > self.live_capacity {
+            self.live_capacity = n.next_power_of_two();
+            self.live = Self::instance_buffer(device, self.live_capacity);
+        }
+        if n > 0 {
+            queue.write_buffer(&self.live, 0, bytemuck::cast_slice(&self.live_scratch));
+        }
+        self.live_count = n as u32;
+    }
+
+    /// Draws grid, the document and the stroke being drawn (on top) into `target`. `size` is logical px;
+    /// `px_per_pt` the surface scale factor.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -207,6 +239,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         doc: &Document,
+        live: Option<&Stroke>,
         viewport: &Viewport,
         size: [f32; 2],
         px_per_pt: f32,
@@ -214,6 +247,7 @@ impl Renderer {
         #[cfg(feature = "profile")]
         let _span = tracy_client::span!("Renderer::render");
         self.sync(device, queue, doc);
+        self.sync_live(device, queue, live);
         let u = ViewUniform {
             offset: viewport.offset.to_array(),
             scale: viewport.scale,
@@ -244,6 +278,11 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.instances.slice(..));
             pass.draw(0..6, 0..self.uploaded as u32);
         }
+        if self.live_count > 0 {
+            pass.set_pipeline(&self.strokes);
+            pass.set_vertex_buffer(0, self.live.slice(..));
+            pass.draw(0..6, 0..self.live_count);
+        }
     }
 }
 
@@ -251,7 +290,8 @@ impl Renderer {
 mod tests {
     use super::*;
     use glam::Vec2;
-    use nc_core::Stroke;
+    use nc_core::Element;
+    use std::sync::Arc;
 
     #[test]
     fn segment_layout_is_tight() {
@@ -260,7 +300,7 @@ mod tests {
         assert_eq!(size_of::<ViewUniform>() % 16, 0);
     }
 
-    /// Renders a horizontal stroke offscreen and checks ink lands at the top-left-origin position.
+    /// Renders a committed and a live stroke offscreen and checks ink lands at the top-left-origin position.
     #[test]
     fn draws_stroke_offscreen() {
         let instance =
@@ -290,10 +330,9 @@ mod tests {
         let view = tex.create_view(&Default::default());
         let mut stroke = Stroke::new(Vec2::new(8.0, 16.0), 6.0, [1.0, 0.0, 0.0, 1.0]);
         stroke.push(Vec2::new(56.0, 16.0));
-        let doc = Document {
-            strokes: vec![stroke],
-            generation: 0,
-        };
+        let doc = Document::from_elements([Arc::new(Element::stroke(stroke))]);
+        let mut live = Stroke::new(Vec2::new(8.0, 40.0), 6.0, [0.0, 1.0, 0.0, 1.0]);
+        live.push(Vec2::new(56.0, 40.0));
 
         let mut r = Renderer::new(&device, format);
         let mut enc = device.create_command_encoder(&Default::default());
@@ -303,6 +342,7 @@ mod tests {
             &mut enc,
             &view,
             &doc,
+            Some(&live),
             &Viewport::default(),
             [w as f32, h as f32],
             1.0,
@@ -342,9 +382,14 @@ mod tests {
             at(32, 16)
         );
         assert!(
-            at(32, 48)[0] < 40,
-            "no ink far below the stroke (y-down): {:?}",
-            at(32, 48)
+            at(32, 40)[1] > 240 && at(32, 40)[0] < 20,
+            "live stroke drawn: {:?}",
+            at(32, 40)
+        );
+        assert!(
+            at(32, 56)[0] < 40 && at(32, 56)[1] < 40,
+            "no ink far below the strokes (y-down): {:?}",
+            at(32, 56)
         );
     }
 }

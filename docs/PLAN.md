@@ -68,7 +68,7 @@ crates/
   spike-iced/  Phase 0 iced 0.14 host spike, kept as the rerun harness for the shell decision.
 packaging/     PKGBUILD, PKGBUILD-bin, .desktop, metainfo.xml, icons, AppImage recipe.
 ```
-The scaffold has `nc-core`, `nc-render`, `nc-app`. Add the others when their phase starts.
+Present after Phase 1: `nc-core`, `nc-render`, `nc-store`, `nc-app`, `nc-bench`, `spike-iced`. `nc-export` arrives in Phase 4.
 
 **Coordinates (one convention, everywhere):** world space is y-down, origin top-left, 1 unit = 1 logical px
 at 100%. `screen = world * scale + offset`. Matches Wayland, SVG, PDF and PNG; the only flip is world→clip in

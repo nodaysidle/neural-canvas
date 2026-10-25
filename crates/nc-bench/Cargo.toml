@@ -9,6 +9,7 @@ description = "Measurement harness (S2k frame pacing, latency, tablet probe). De
 [dependencies]
 nc-core.workspace = true
 nc-render.workspace = true
+nc-store.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 wgpu.workspace = true

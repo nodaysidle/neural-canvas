@@ -16,3 +16,6 @@ glam.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 pollster.workspace = true
+nc-store.workspace = true
+signal-hook = "0.4"
+dirs = "7"

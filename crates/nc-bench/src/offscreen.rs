@@ -97,6 +97,7 @@ pub fn run(stroke_counts: &[usize], frames: usize) {
                     &mut enc,
                     &view,
                     &doc,
+                    None,
                     &viewport,
                     size.to_array(),
                     1.0,

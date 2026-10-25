@@ -1,10 +1,11 @@
 //! Deterministic stress scenes for benchmarks and perf tests (docs/PERFORMANCE-BUDGET.md, "S2k").
 
-use crate::{Document, Stroke};
+use crate::{Document, Element, ElementKind, Stroke};
 use glam::Vec2;
 use kurbo::{CubicBez, ParamCurve, Point};
-use rand::{RngExt, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use std::sync::Arc;
 
 pub const S2K_STROKES: usize = 2_000;
 pub const S2K_POINTS_PER_STROKE: usize = 100;
@@ -22,7 +23,7 @@ pub fn s2k(seed: u64) -> Document {
 /// `strokes` cubic-Bézier strokes of exactly `points_per_stroke` points each.
 pub fn scene(seed: u64, strokes: usize, points_per_stroke: usize) -> Document {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut doc = Document::default();
+    let mut elements = Vec::with_capacity(strokes);
     for _ in 0..strokes {
         let origin = Point::new(
             rng.random_range(0.0..S2K_EXTENT.x as f64),
@@ -41,23 +42,37 @@ pub fn scene(seed: u64, strokes: usize, points_per_stroke: usize) -> Document {
         for i in 1..points_per_stroke {
             stroke.push(at(i));
         }
-        doc.strokes.push(stroke);
+        // Ids from the same seeded stream, so the whole document is reproducible.
+        let mut id = [0u8; 16];
+        rng.fill_bytes(&mut id);
+        elements.push(Arc::new(Element {
+            id: uuid::Builder::from_random_bytes(id).into_uuid(),
+            kind: ElementKind::Stroke(stroke),
+        }));
     }
-    doc
+    Document::from_elements(elements)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn stroke(e: &Element) -> &Stroke {
+        match &e.kind {
+            ElementKind::Stroke(s) => s,
+            other => panic!("S2k holds strokes only, got {other:?}"),
+        }
+    }
+
     #[test]
     fn s2k_has_the_budgeted_size() {
         let doc = s2k(1);
-        assert_eq!(doc.strokes.len(), 2_000);
-        let points: usize = doc.strokes.iter().map(|s| s.points.len()).sum();
+        assert_eq!(doc.elements().len(), 2_000);
+        let strokes: Vec<&Stroke> = doc.elements().iter().map(|e| stroke(e)).collect();
+        let points: usize = strokes.iter().map(|s| s.points.len()).sum();
         assert_eq!(points, 200_000, "no sample may be dropped as a duplicate");
         assert!(
-            doc.strokes
+            strokes
                 .iter()
                 .flat_map(|s| &s.points)
                 .all(|p| p.is_finite())
@@ -66,14 +81,8 @@ mod tests {
 
     #[test]
     fn same_seed_same_scene_other_seed_differs() {
-        let pts = |seed| -> Vec<Vec2> {
-            scene(seed, 50, 20)
-                .strokes
-                .into_iter()
-                .flat_map(|s| s.points)
-                .collect()
-        };
-        assert_eq!(pts(7), pts(7));
-        assert_ne!(pts(7), pts(8));
+        let a = scene(7, 50, 20);
+        assert_eq!(a.elements(), scene(7, 50, 20).elements(), "ids included");
+        assert_ne!(a.elements(), scene(8, 50, 20).elements());
     }
 }

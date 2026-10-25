@@ -2,7 +2,19 @@
 //!
 //! World space is y-down, origin top-left, 1 unit = 1 logical px at 100% zoom (docs/PLAN.md §2).
 
+pub mod actions;
+pub mod command;
+pub mod document;
+pub mod element;
 pub mod scene;
+
+pub use actions::{Action, Shortcut};
+pub use command::{Command, CommandError, History, Session};
+pub use document::{Document, Segment};
+pub use element::{
+    Element, ElementId, ElementKind, RecognizedShape, Shape, ShapeKind, ShapeType, Stroke,
+};
+pub use kurbo::Rect;
 
 use glam::Vec2;
 
@@ -39,6 +51,20 @@ impl Viewport {
         self.offset += delta;
     }
 
+    /// Shows all of `bounds` centred in a `screen`-sized view with `padding` logical px on each side
+    /// (Mac bug #18: zoom to fit must use the content's real bounds).
+    pub fn fit(bounds: Rect, screen: Vec2, padding: f32) -> Self {
+        let avail = (screen - Vec2::splat(2.0 * padding)).max(Vec2::ONE);
+        let size = Vec2::new(bounds.width() as f32, bounds.height() as f32).max(Vec2::splat(1e-3));
+        let scale = (avail / size).min_element().clamp(MIN_ZOOM, MAX_ZOOM);
+        let center = bounds.center();
+        let center = Vec2::new(center.x as f32, center.y as f32);
+        Self {
+            scale,
+            offset: screen * 0.5 - center * scale,
+        }
+    }
+
     /// Zooms by `factor`, keeping the world point under `anchor` (logical screen px) fixed.
     pub fn zoom_at(&mut self, anchor: Vec2, factor: f32) {
         let world = self.screen_to_world(anchor);
@@ -47,75 +73,10 @@ impl Viewport {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Stroke {
-    pub points: Vec<Vec2>,
-    pub width: f32,
-    /// Linear RGBA.
-    pub color: [f32; 4],
-}
-
-impl Stroke {
-    pub fn new(start: Vec2, width: f32, color: [f32; 4]) -> Self {
-        Self {
-            points: vec![start],
-            width,
-            color,
-        }
-    }
-
-    /// Drops near-duplicate samples so segment directions are never NaN.
-    pub fn push(&mut self, p: Vec2) -> bool {
-        if self
-            .points
-            .last()
-            .is_some_and(|last| last.distance_squared(p) < 1e-8)
-        {
-            return false;
-        }
-        self.points.push(p);
-        true
-    }
-}
-
-/// A capsule from `a` to `b`. A single-point stroke yields one zero-length segment (a dot).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Segment {
-    pub a: Vec2,
-    pub b: Vec2,
-    pub half_width: f32,
-    pub color: [f32; 4],
-}
-
-#[derive(Default, Debug)]
-pub struct Document {
-    pub strokes: Vec<Stroke>,
-    /// Bumped on any edit that is not a pure append, so renderers know to rebuild instead of append.
-    pub generation: u64,
-}
-
-impl Document {
-    pub fn segments(&self) -> impl Iterator<Item = Segment> + '_ {
-        self.strokes.iter().flat_map(|s| {
-            let hw = s.width * 0.5;
-            let pairs: Box<dyn Iterator<Item = (Vec2, Vec2)>> = if s.points.len() == 1 {
-                Box::new(std::iter::once((s.points[0], s.points[0])))
-            } else {
-                Box::new(s.points.windows(2).map(|w| (w[0], w[1])))
-            };
-            pairs.map(move |(a, b)| Segment {
-                a,
-                b,
-                half_width: hw,
-                color: s.color,
-            })
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn zoom_keeps_anchor_fixed() {
@@ -157,18 +118,58 @@ mod tests {
         assert!((v.screen_to_world(v.world_to_screen(p)) - p).length() < 1e-3);
     }
 
+    /// Mac bug #18 guard: fit frames the real content, wherever it is.
     #[test]
-    fn duplicate_points_dropped_and_segments_counted() {
-        let mut s = Stroke::new(Vec2::ZERO, 2.0, [1.0; 4]);
-        assert!(!s.push(Vec2::ZERO));
-        assert!(s.push(Vec2::X));
-        assert!(s.push(Vec2::ONE));
-        let doc = Document {
-            strokes: vec![s, Stroke::new(Vec2::Y, 2.0, [1.0; 4])],
-            generation: 0,
-        };
-        let segs: Vec<_> = doc.segments().collect();
-        assert_eq!(segs.len(), 3); // 2 segments + 1 dot
-        assert!(segs.iter().all(|s| s.a.is_finite() && s.b.is_finite()));
+    fn fit_uses_content_bounds() {
+        let bounds = Rect::new(5_000.0, -3_000.0, 5_400.0, -2_900.0);
+        let screen = Vec2::new(1280.0, 800.0);
+        let v = Viewport::fit(bounds, screen, 32.0);
+        let tl = v.world_to_screen(Vec2::new(5_000.0, -3_000.0));
+        let br = v.world_to_screen(Vec2::new(5_400.0, -2_900.0));
+        assert!(tl.cmpge(Vec2::splat(31.9)).all() && br.cmple(screen - 31.9).all());
+        assert!((tl + br - screen).length() < 1e-2, "content is centred");
+        assert!(
+            (br.x - tl.x - (1280.0 - 64.0)).abs() < 1e-2,
+            "the wider side fills the view"
+        );
+    }
+
+    #[test]
+    fn fit_of_a_dot_is_clamped() {
+        let v = Viewport::fit(
+            Rect::new(10.0, 10.0, 10.0, 10.0),
+            Vec2::new(800.0, 600.0),
+            0.0,
+        );
+        assert_eq!(v.scale, MAX_ZOOM);
+        assert!((v.world_to_screen(Vec2::splat(10.0)) - Vec2::new(400.0, 300.0)).length() < 1e-3);
+    }
+
+    proptest! {
+        #[test]
+        fn roundtrip_any_view(
+            ox in -1e4f32..1e4, oy in -1e4f32..1e4, scale in MIN_ZOOM..MAX_ZOOM,
+            px in -1e4f32..1e4, py in -1e4f32..1e4,
+        ) {
+            let v = Viewport { offset: Vec2::new(ox, oy), scale };
+            let p = Vec2::new(px, py);
+            let back = v.screen_to_world(v.world_to_screen(p));
+            prop_assert!(back.is_finite());
+            prop_assert!((back - p).length() <= 1e-3 * (1.0 + p.length() + Vec2::new(ox, oy).length() / scale));
+        }
+
+        #[test]
+        fn zoom_holds_any_anchor(
+            scale in MIN_ZOOM..MAX_ZOOM, factor in 0.01f32..100.0,
+            ax in 0f32..2560.0, ay in 0f32..1440.0,
+        ) {
+            let mut v = Viewport { offset: Vec2::new(-300.0, 120.0), scale };
+            let anchor = Vec2::new(ax, ay);
+            let before = v.screen_to_world(anchor);
+            v.zoom_at(anchor, factor);
+            prop_assert!(v.scale >= MIN_ZOOM && v.scale <= MAX_ZOOM);
+            // World point under the anchor stays put, measured in screen px.
+            prop_assert!((v.world_to_screen(before) - anchor).length() < 1e-2);
+        }
     }
 }

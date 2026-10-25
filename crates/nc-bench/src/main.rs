@@ -4,9 +4,11 @@
 //! nc-bench offscreen [frames]                    renderer cost vs scene size, headless, 2560x1440
 //! nc-bench window <panzoom|draw> <fifo|mailbox|immediate> [secs]
 //! nc-bench tablet [secs]                         log zwp_tablet_v2 vs winit pointer events
+//! nc-bench store [dir]                           S2k save/load cost against a real file (default: temp dir)
 //! ```
 
 mod offscreen;
+mod store;
 mod window;
 
 use window::{Config, Scenario};
@@ -38,6 +40,7 @@ fn main() {
                 secs: secs(3, 20.0),
             });
         }
+        Some("store") => store::run(&arg(1).map_or_else(std::env::temp_dir, Into::into)),
         Some("tablet") => window::run(Config {
             scenario: Scenario::Tablet,
             present_mode: wgpu::PresentMode::Fifo,
@@ -49,7 +52,7 @@ fn main() {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: nc-bench offscreen [frames]\n       nc-bench window <panzoom|draw> <fifo|mailbox|immediate> [secs]\n       nc-bench tablet [secs]"
+        "usage: nc-bench offscreen [frames]\n       nc-bench window <panzoom|draw> <fifo|mailbox|immediate> [secs]\n       nc-bench tablet [secs]\n       nc-bench store [dir]"
     );
     std::process::exit(2);
 }

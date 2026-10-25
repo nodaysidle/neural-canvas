@@ -31,6 +31,9 @@ by raw winit (today) or an iced `shader` widget (Phase 5) unchanged.
 crates/
   nc-core/     document, strokes, viewport maths. No GPU, no window. Unit-tested.
   nc-render/   wgpu renderer: grid + instanced SDF capsule strokes (canvas.wgsl). Offscreen-tested.
+  nc-store/    SQLite (WAL) persistence on its own thread: one row per element, 300 ms debounce.
+  nc-bench/    measurement harness (S2k frame pacing, scanout latency, save cost). Never packaged.
+  spike-iced/  Phase 0 iced host spike, kept to rerun the shell decision.
   nc-app/      `neuralcanvas` binary: winit window, wgpu surface, input → core → render.
 docs/
   PLAN.md               merged final plan (stack, architecture, bugs to design out, phases)
@@ -42,7 +45,7 @@ AGENT_PROMPT.md         self-contained brief for the agent that builds the full 
 
 ## Build and run
 
-Needs Rust ≥ 1.85 (tested 1.98.1) and a Vulkan driver.
+Needs Rust ≥ 1.89 (tested 1.98.1) and a Vulkan driver.
 
 ```sh
 sudo pacman -S --needed rust vulkan-icd-loader vulkan-intel   # or vulkan-radeon / nvidia-utils
@@ -51,8 +54,12 @@ cargo test            # includes an offscreen GPU render test (skips if no adapt
 cargo clippy --all-targets -- -D warnings
 ```
 
-Controls in the scaffold: left-drag draws, middle-drag or Space+drag pans, wheel / Ctrl+touchpad scroll /
-pinch zooms at the cursor, touchpad two-finger scroll pans, `Ctrl+0` resets the view.
+Controls: left-drag draws, middle-drag or Space+drag pans, wheel / Ctrl+touchpad scroll / pinch zooms at the
+cursor, touchpad two-finger scroll pans. `Ctrl+Z` undoes, `Ctrl+Shift+Z` or `Ctrl+Y` redoes, `Ctrl+0` zooms to
+fit the drawing, `Ctrl+1` shows it at 100 %.
+
+Work saves itself to `$XDG_DATA_HOME/neuralcanvas/neuralcanvas.db` (usually
+`~/.local/share/neuralcanvas/`) within 300 ms of each change, and on close or `SIGTERM`.
 
 The Wayland app id is `sh.nodaysidle.NeuralCanvas` (Hyprland `class`), pending confirmation of the domain.
 

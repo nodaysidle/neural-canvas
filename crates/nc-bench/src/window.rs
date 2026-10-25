@@ -4,7 +4,7 @@
 use glam::Vec2;
 use nc_bench::stats::Summary;
 use nc_bench::wl::SideChannel;
-use nc_core::{Document, Stroke, Viewport, scene};
+use nc_core::{Command, Document, Element, Stroke, Viewport, scene};
 use nc_render::Renderer;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,6 +52,8 @@ struct Bench {
     gpu: Option<Gpu>,
     wl: Option<SideChannel>,
     doc: Document,
+    /// The synthetic pen's stroke, committed as a command every 2 s like the app does on pen-up.
+    live: Option<Stroke>,
     viewport: Viewport,
     started: Option<Instant>,
     frames: Vec<FrameRec>,
@@ -63,6 +65,7 @@ pub fn run(cfg: Config) {
     let event_loop = EventLoop::new().expect("event loop");
     let mut bench = Bench {
         doc: scene::s2k(1),
+        live: None,
         cfg,
         gpu: None,
         wl: None,
@@ -161,10 +164,13 @@ impl Bench {
                             (s * 3.3).sin() as f32 * 250.0,
                         );
                     if self.pen_samples.is_multiple_of(2_000) {
-                        self.doc
-                            .strokes
-                            .push(Stroke::new(p, 2.5, [0.9, 0.6, 0.3, 1.0]));
-                    } else if let Some(stroke) = self.doc.strokes.last_mut() {
+                        if let Some(done) = self.live.take() {
+                            Command::append(Element::stroke(done))
+                                .apply(&mut self.doc)
+                                .expect("append always applies");
+                        }
+                        self.live = Some(Stroke::new(p, 2.5, [0.9, 0.6, 0.3, 1.0]));
+                    } else if let Some(stroke) = &mut self.live {
                         stroke.push(p);
                     }
                     self.pen_samples += 1;
@@ -353,6 +359,7 @@ impl Bench {
             &mut encoder,
             &view,
             &self.doc,
+            self.live.as_ref(),
             &self.viewport,
             size.to_array(),
             scale,

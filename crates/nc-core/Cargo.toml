@@ -6,6 +6,11 @@ license.workspace = true
 
 [dependencies]
 glam.workspace = true
-kurbo = "0.13"
+kurbo.workspace = true
+serde.workspace = true
+uuid.workspace = true
 rand = { version = "0.10", default-features = false }
 rand_chacha = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+proptest.workspace = true
