@@ -1,76 +1,124 @@
 # NeuralCanvas for Linux
 
-A GPU-accelerated sketch-to-wireframe canvas for Linux. Arch + Wayland/Hyprland first.
-This repo is the **scaffold**: a Cargo workspace whose window opens a wgpu canvas with a world-space grid
-and lets you draw, pan and zoom. The full app is built on top of it by following
-[`AGENT_PROMPT.md`](AGENT_PROMPT.md) and [`docs/PLAN.md`](docs/PLAN.md).
+**A GPU-accelerated sketch-to-wireframe canvas for Linux (Arch + Wayland/Hyprland). Freehand sketches to clean, aligned wireframes with instant style mirroring and vector export.**
 
-## Stack choice: Rust + winit + wgpu (iced for the shell)
+![Release](https://img.shields.io/badge/release-v0.1.0-blue)
+![Platform](https://img.shields.io/badge/platform-Arch%20%2F%20Wayland%20%2F%20Hyprland-1793d1)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Engine](https://img.shields.io/badge/engine-Rust%20%2F%20wgpu%20%2F%20Vulkan-orange)
 
-The two port plans (`nodaysidle-knowledge/briefs/neuralcanvas/nc-linux-plan-{claude,gemini}.md`) disagree on
-the shell and agree on everything below it:
+Draw a layout with a mouse or pen. NeuralCanvas recognises the strokes as UI elements, shows a clean wireframe over
+your sketch, lets you edit it, restyles it from a screenshot of any app, and exports it. Everything runs on your
+machine.
 
-| | Claude plan | Gemini plan |
+## Core capabilities
+
+- **Infinite GPU canvas.** Instanced SDF capsule strokes with analytic anti-aliasing at every angle. 1€ filter
+  smoothing plus one-frame predictive ink keeps the pen tip within 1.3 px (p95) of the pointer. Steady 120 fps at
+  1440p on an Intel Arc iGPU.
+- **Local heuristic recognition.** 96.7 % accuracy on held-out stroke fixtures. Recognises 15 shape types (buttons,
+  inputs, cards, containers, dividers, icons, images, text and geometric primitives) on a worker thread in about
+  55 ms, without blocking the canvas.
+- **Interactive wireframe overlay.** Cycle raw sketch, hybrid and clean wireframe (`W`), set opacity (`[` / `]`),
+  compare side by side (`Shift+W`), and step through low-confidence items (`U`).
+- **Style mirror.** Import an app screenshot. NeuralCanvas extracts the palette with K-Means clustering, estimates
+  corner radii and spacing, checks WCAG 2.1 AA contrast and applies the result to the wireframe.
+- **Export pipeline.** SVG, PDF (`svg2pdf`), PNG (2×) and JPEG, for both the raw sketch and the wireframe.
+- **Local-first and private.** No cloud, no accounts, no telemetry. SQLite (WAL) storage with a 300 ms debounce,
+  flushed on sketch switch, window close and SIGTERM.
+
+## Measured performance
+
+Reference machine: Intel Core Ultra (Meteor Lake), Intel Arc iGPU, Mesa 26.2.5, 2560×1440 @ 120 Hz, Hyprland.
+Scene: 2,000 strokes / 200k points. Release build.
+
+| Metric | Result | Budget |
 |---|---|---|
-| Language | Rust | Rust |
-| Primary | GTK4 + libadwaita + GtkGLArea (GL) | **winit + wgpu + iced** |
-| Fallback | **winit + wgpu + iced** | — |
-| Tauri / WebKitGTK | rejected (12 fps measured on this iGPU) | rejected |
-| Canvas renderer | instanced SDF capsules, live-stroke fast path, world-space grid | SDF strokes, live-stroke ring buffer, world-space grid |
+| p99 frame interval (draw / pan / zoom) | 8.34 ms | ≤ 8.3 ms at 120 Hz refresh |
+| Frames over 16.6 ms | 0 | 0 |
+| CPU cost per input sample | 48 ns | < 1 µs |
+| Cold start to first frame | 111 ms | ≤ 300 ms |
+| RSS, idle | 68 MB | ≤ 80 MB |
+| AppImage size | 9.67 MB | ≤ 40 MB |
+| Idle | 0 scheduled frames, 0 CPU ticks | ~0 % CPU |
 
-**winit + wgpu + iced is the only stack both plans endorse**, so it is the pick. It also removes GTK's
-AppImage bundling pain (Claude plan risk: "High") and keeps one renderer (wgpu/Vulkan) for the window,
-offscreen tests and raster export. The cost, flagged by the Claude plan: Wayland tablet pressure through
-winit is unverified, and iced does not look like GTK. Both are Phase 0 spike items in `docs/PLAN.md` with a
-documented fallback. The canvas renderer (`nc-render`) draws into any `wgpu::TextureView`, so it can be hosted
-by raw winit (today) or an iced `shader` widget (Phase 5) unchanged.
+The 8.34 ms p99 is one refresh interval at 120 Hz (8.33 ms): frames are paced by vsync, not by work.
+Input-to-photon latency is 22.7 ms p95 measured from pointer event to scanout; with predicted ink the derived
+figure is about 14 ms p95. No 240 fps camera run has confirmed it yet. Method, raw numbers and open risks are in
+[`docs/reports/`](docs/reports/).
 
-## Layout
+## Keyboard shortcuts
 
+| Key | Action |
+|---|---|
+| `P` | Pen |
+| `E` | Eraser |
+| `H` | Hand |
+| `Space` (hold) | Temporary hand; the previous tool returns on release |
+| `V` | Select |
+| `R` / `O` / `L` | Rectangle / Ellipse / Line |
+| `W` | Cycle sketch, hybrid, wireframe |
+| `Shift+W` | Side-by-side view |
+| `[` / `]` | Wireframe opacity |
+| `U` | Review uncertain items |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / Redo |
+| `Ctrl+0` | Fit to content |
+| `Ctrl+1` | Zoom to 100 % |
+| `Ctrl+E` / `Ctrl+Shift+E` | Export (all formats to `~/Pictures/NeuralCanvas/`) |
+| `Ctrl+B` / `Ctrl+I` | Toggle sidebar / inspector |
+| `Ctrl+?` | Shortcuts overlay |
+
+## Installation
+
+### AppImage
+
+Download `NeuralCanvas-0.1.0-x86_64.AppImage` (9.67 MB) and its `.sha256` from the
+[releases page](https://github.com/nodaysidle/neural-canvas/releases), then verify and run:
+
+```sh
+sha256sum -c NeuralCanvas-0.1.0-x86_64.AppImage.sha256
+chmod +x NeuralCanvas-0.1.0-x86_64.AppImage
+./NeuralCanvas-0.1.0-x86_64.AppImage
 ```
-crates/
-  nc-core/     document, strokes, viewport maths, recognition, style mirror. No GPU, no window.
-  nc-render/   wgpu renderer: grid, instanced SDF capsule strokes, UI pass (rects, images, glyphon text).
-  nc-store/    SQLite (WAL) persistence on its own thread: one row per element, 300 ms debounce.
-  nc-export/   SVG writer; PDF (svg2pdf), PNG and JPEG (resvg); raw sketch and wireframe.
-  nc-shell/    shell layout (bar, palette, sidebar, inspector, toasts, dialogs) and all UI copy. No GPU.
-  nc-wayland/  Wayland side channel: presentation feedback and tablet (pen pressure, eraser) input.
-  nc-bench/    measurement harness (S2k frame pacing, scanout latency, save cost). Never packaged.
-  spike-iced/  Phase 0 iced host spike, kept to rerun the shell decision.
-  nc-app/      `neuralcanvas` binary: winit window, wgpu surface, input → core → render.
-packaging/     desktop file, AppStream metainfo, icons, PKGBUILDs, AppImage recipe, release and
-               check scripts (docs/RELEASING.md).
-docs/
-  PLAN.md               merged final plan (stack, architecture, bugs to design out, phases)
-  UX-PRINCIPLES.md      what "polished" means here
-  PERFORMANCE-BUDGET.md frame/latency/memory budgets and how to measure them
-  RELEASING.md          release checklist; every artefact ships a .sha256
-AGENT_PROMPT.md         self-contained brief for the agent that builds the full app
+
+The AppImage uses your system's Wayland library and GPU driver, so you need a working Vulkan driver.
+
+### Arch Linux
+
+Build from source with `packaging/arch/PKGBUILD`, or install the prebuilt binary with `packaging/arch/PKGBUILD-bin`:
+
+```sh
+cd packaging/arch
+makepkg -si -p PKGBUILD        # or: makepkg -si -p PKGBUILD-bin
 ```
 
-## Build and run
+### Build from source
 
-Needs Rust ≥ 1.89 (tested 1.98.1) and a Vulkan driver.
+Needs Rust ≥ 1.89 and a Vulkan driver.
 
 ```sh
 sudo pacman -S --needed rust vulkan-icd-loader vulkan-intel   # or vulkan-radeon / nvidia-utils
-cargo run --release
-cargo test            # includes an offscreen GPU render test (skips if no adapter)
-cargo clippy --all-targets -- -D warnings
+cargo run --release -p neuralcanvas
 ```
 
-Controls: `P` pen, `E` eraser, `H` hand; hold `Space` for a temporary hand. Left-drag uses the tool,
-middle-drag pans, wheel / Ctrl+touchpad scroll / pinch zooms at the cursor, touchpad two-finger scroll
-pans. `Ctrl+Z` undoes, `Ctrl+Shift+Z` or `Ctrl+Y` redoes, `Ctrl+0` zooms to fit the drawing, `Ctrl+1` shows
-it at 100 % (both animate unless the desktop asks for reduced motion). A stylus draws with pressure and
-its eraser end erases.
+Checks: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`.
 
-Work saves itself to `$XDG_DATA_HOME/neuralcanvas/neuralcanvas.db` (usually
-`~/.local/share/neuralcanvas/`) within 300 ms of each change, and on close or `SIGTERM`.
+## Repository architecture
 
-The Wayland app id is `sh.nodaysidle.NeuralCanvas` (Hyprland `class`), pending confirmation of the domain.
+| Crate | Role |
+|---|---|
+| `nc-core` | Document model, commands and undo, stroke geometry, viewport maths, recognition, style mirror. No GPU, no window. |
+| `nc-render` | wgpu renderer: grid, instanced SDF strokes, wireframe overlay, UI pass. Tested offscreen. |
+| `nc-store` | SQLite (WAL) persistence on its own thread: one row per element, schema migrations. |
+| `nc-export` | SVG writer (single source of truth), PDF via `svg2pdf`, PNG and JPEG via `resvg`. |
+| `nc-shell` | Shell layout and all UI copy: bar, palette, sidebar, inspector, toasts, dialogs. Emits a scene and accessibility regions. |
+| `nc-wayland` | Side channel on winit's Wayland display: presentation feedback and tablet (pressure, tilt, eraser) input. |
+| `nc-app` | The `neuralcanvas` binary: window, input, actions, workers. |
 
-## Releases
+`nc-bench` (measurement harness) and `spike-iced` (shell spike) are development-only and never packaged.
+Design decisions live in [`docs/PLAN.md`](docs/PLAN.md); budgets in
+[`docs/PERFORMANCE-BUDGET.md`](docs/PERFORMANCE-BUDGET.md).
 
-Every release artefact ships with a matching `<file>.sha256`. Verify with `sha256sum -c <file>.sha256`.
-See [`docs/RELEASING.md`](docs/RELEASING.md).
+## License
+
+MIT. Bundled fonts (Manrope, DM Mono) are SIL OFL; their texts ship next to [`LICENSE`](LICENSE).
