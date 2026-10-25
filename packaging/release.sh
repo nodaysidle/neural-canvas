@@ -13,15 +13,17 @@ root=$(git rev-parse --show-toplevel)
 cd "$root"
 ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
 rust=$(rustc -V | cut -d' ' -f2)
+# What ships: everything but the PKGBUILDs (they carry the artefacts' checksums) and the reports.
+shipped=(. ':!packaging/arch' ':!docs/reports')
 # File times in the archives: the last commit that changed what ships, so a commit that only updates
 # the PKGBUILD checksums or the reports leaves every artefact byte for byte the same.
-mtime=$(git log -1 --format=%ct -- . ':!packaging/arch' ':!docs/reports')
+mtime=$(git log -1 --format=%ct -- "${shipped[@]}")
 dist=$root/dist
 
 # NC_RELEASE_TREE=index builds from what is staged instead, for trying the packaging before committing.
 if [ "${NC_RELEASE_TREE:-HEAD}" = index ]; then
     tree=$(git write-tree)
-elif [ -n "$(git status --porcelain --untracked-files=no -- . ':!packaging/arch')" ]; then
+elif [ -n "$(git status --porcelain --untracked-files=no -- "${shipped[@]}")" ]; then
     echo "release.sh: commit your changes first; artefacts are built from HEAD" >&2
     exit 1
 else
@@ -32,9 +34,9 @@ rm -rf "$dist"
 mkdir -p "$dist"
 
 echo "== source"
-# The tree, not the commit: an archived commit carries its id in the tar header, so the checksum would
-# change with every commit, even one that changes nothing that ships.
-git archive --format=tar --prefix="neuralcanvas-$ver/" "$tree^{tree}" | gzip -n -9 > "$dist/neuralcanvas-$ver.tar.gz"
+# The tree, not the commit (an archived commit carries its id in the tar header), with the file times
+# given (a tree is otherwise stamped with the current time).
+git archive --format=tar --mtime="$mtime +0000" --prefix="neuralcanvas-$ver/" "$tree^{tree}" | gzip -n -9 > "$dist/neuralcanvas-$ver.tar.gz"
 
 echo "== binary tarball and AppImage (ubuntu:24.04, Rust $rust)"
 docker run --rm \
