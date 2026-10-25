@@ -77,14 +77,16 @@ rect() { printf 'move %d %d 80\ndown\nmove %d %d 300\nmove %d %d 200\nmove %d %d
 shot 02-drawn-wireframe
 
 step "style mirror: paste a screenshot, apply, save as preset"
-# Ctrl+V with an image on the clipboard reads its style. The clipboard's text is put back afterwards.
+# Ctrl+V with an image on the clipboard reads its style. The clipboard's text is put back afterwards
+# (a clipboard history, if one runs, keeps the screenshot).
 # (The file chooser route is the same reader; GTK's chooser ignores synthetic input too often to script.)
 saved=$home/clipboard.txt
 wl-paste --no-newline --type text/plain > "$saved" 2>/dev/null || rm -f "$saved"
-wl-copy --type image/png < "$screenshot"
+# wl-copy stays behind to serve the clipboard: keep it off this script's output, or a pipe never ends.
+wl-copy --type image/png < "$screenshot" >/dev/null 2>&1
 printf 'key -M ctrl i -m ctrl\nwait 400\n' | drive
 printf 'key -M ctrl v -m ctrl\nwait 3000\n' | drive
-if [ -f "$saved" ]; then wl-copy < "$saved"; else wl-copy --clear; fi
+if [ -f "$saved" ]; then wl-copy < "$saved" >/dev/null 2>&1; else wl-copy --clear; fi
 shot 03-style-read
 click $((ww - 236)) 320 800 # Apply
 click $((ww - 210)) 320 800 # Save as preset
