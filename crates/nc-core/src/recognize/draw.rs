@@ -4,6 +4,8 @@
 use super::{Recognized, Wireframe};
 use crate::document::{Segment, stroke_segments};
 use crate::element::{ShapeType, Stroke};
+use crate::style::Style;
+use crate::theme::hex;
 use glam::Vec2;
 use kurbo::{Ellipse, PathEl, Rect, RoundedRect, Shape};
 
@@ -152,7 +154,7 @@ pub fn marks(s: &Recognized, out: &mut Vec<Mark>) {
 /// Flattening tolerance for curves in world units.
 const TOLERANCE: f64 = 0.1;
 
-fn outline(path: impl Shape, color: [f32; 4], out: &mut Vec<Segment>) {
+fn outline(path: impl Shape, color: [f32; 4], width: f32, out: &mut Vec<Segment>) {
     let mut points = Vec::new();
     kurbo::flatten(path.path_elements(TOLERANCE), TOLERANCE, |el| match el {
         PathEl::MoveTo(p) | PathEl::LineTo(p) => points.push(v(p.x, p.y)),
@@ -164,7 +166,7 @@ fn outline(path: impl Shape, color: [f32; 4], out: &mut Vec<Segment>) {
         _ => {}
     });
     if let Some((first, rest)) = points.split_first() {
-        let mut stroke = Stroke::new(*first, LINE_WIDTH, color);
+        let mut stroke = Stroke::new(*first, width, color);
         rest.iter().for_each(|p| {
             stroke.push(*p);
         });
@@ -172,14 +174,17 @@ fn outline(path: impl Shape, color: [f32; 4], out: &mut Vec<Segment>) {
     }
 }
 
-/// Capsules for one mark, as the canvas draws it.
-pub fn tessellate(mark: &Mark, color: [f32; 4], out: &mut Vec<Segment>) {
-    let hw = LINE_WIDTH / 2.0;
+/// Capsules for one mark's outline, `width` world units wide, as the canvas draws it.
+pub fn tessellate(mark: &Mark, color: [f32; 4], width: f32, out: &mut Vec<Segment>) {
+    let hw = width / 2.0;
     match *mark {
-        Mark::Rect { rect, radius } => {
-            outline(RoundedRect::from_rect(rect, radius as f64), color, out)
-        }
-        Mark::Ellipse { rect } => outline(Ellipse::from_rect(rect), color, out),
+        Mark::Rect { rect, radius } => outline(
+            RoundedRect::from_rect(rect, radius as f64),
+            color,
+            width,
+            out,
+        ),
+        Mark::Ellipse { rect } => outline(Ellipse::from_rect(rect), color, width, out),
         Mark::Line { a, b } => out.push(Segment {
             a,
             b,
@@ -199,14 +204,161 @@ pub fn tessellate(mark: &Mark, color: [f32; 4], out: &mut Vec<Segment>) {
     }
 }
 
-/// The whole wireframe as capsules, uncertain elements in their own colour.
-pub fn segments(wire: &Wireframe, light: bool, out: &mut Vec<Segment>) {
+/// How the wireframe is coloured: in the theme's wireframe colour, or in a style taken from a
+/// screenshot, as a filled mockup.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Look {
+    Plain { light: bool },
+    Styled(Style),
+}
+
+/// One mark and how it is painted. A `Bar` is always solid, in its `fill` colour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Painted {
+    pub mark: Mark,
+    pub fill: Option<[f32; 4]>,
+    pub stroke: Option<[f32; 4]>,
+    /// Stroke width, world units.
+    pub width: f32,
+}
+
+/// Outline width of a styled element, world units: a border, not a sketch line.
+pub const STYLED_LINE_WIDTH: f32 = 1.0;
+
+fn alpha(c: [f32; 4], a: f32) -> [f32; 4] {
+    [c[0], c[1], c[2], c[3] * a]
+}
+
+/// The whole wireframe as painted marks, bottom to top. Styled, it sits on a backdrop in the style's
+/// background, larger elements first so a card never covers what is inside it; elements the quality
+/// gate flags keep their warning outline either way.
+pub fn paint(wire: &Wireframe, look: &Look, out: &mut Vec<Painted>) {
     let mut marks = Vec::new();
-    for s in &wire.shapes {
+    let style = match look {
+        Look::Plain { light } => {
+            for s in &wire.shapes {
+                marks.clear();
+                self::marks(s, &mut marks);
+                let c = color(*light, s.is_uncertain());
+                out.extend(marks.iter().map(|&mark| Painted {
+                    mark,
+                    fill: matches!(mark, Mark::Bar { .. }).then_some(c),
+                    stroke: (!matches!(mark, Mark::Bar { .. })).then_some(c),
+                    width: LINE_WIDTH,
+                }));
+            }
+            return;
+        }
+        Look::Styled(style) => style,
+    };
+    let [bg, surface, accent, text, on_accent] = [
+        style.background,
+        style.surface,
+        style.accent,
+        style.text,
+        style.on_accent(),
+    ]
+    .map(hex);
+    // The quality gate's amber, in the shade that reads on the style's background.
+    let light_background =
+        crate::theme::contrast(bg, [0.0, 0.0, 0.0, 1.0]) > crate::theme::contrast(bg, [1.0; 4]);
+    let warning = color(light_background, true);
+    if let Some(all) = wire
+        .shapes
+        .iter()
+        .map(|s| s.bounds)
+        .reduce(|a, b| a.union(b))
+    {
+        let pad = 2.0 * style.spacing as f64;
+        out.push(Painted {
+            mark: Mark::Rect {
+                rect: all.inflate(pad, pad),
+                radius: 0.0,
+            },
+            fill: Some(bg),
+            stroke: None,
+            width: 0.0,
+        });
+    }
+    let mut order: Vec<&Recognized> = wire.shapes.iter().collect();
+    order.sort_by(|a, b| b.bounds.area().total_cmp(&a.bounds.area()));
+    for s in order {
+        use ShapeType as T;
+        // The element's body, its outline, its placeholder bar, its lines.
+        let border = alpha(text, 0.15);
+        let (body, outline, bar, line) = match s.shape_type {
+            T::Button | T::Icon => (Some(accent), None, on_accent, text),
+            T::InputField => (Some(bg), Some(alpha(text, 0.35)), text, text),
+            T::Image => (Some(surface), None, text, alpha(text, 0.3)),
+            T::Divider => (None, None, text, alpha(text, 0.2)),
+            T::Line | T::Arrow | T::Text => (None, None, text, text),
+            T::Rectangle
+            | T::RoundedRectangle
+            | T::Card
+            | T::Container
+            | T::Circle
+            | T::Ellipse
+            | T::Unknown => (Some(surface), Some(border), text, text),
+        };
+        let uncertain = s.is_uncertain();
+        let rounded = !matches!(s.shape_type, T::Rectangle);
         marks.clear();
         self::marks(s, &mut marks);
-        let color = color(light, s.is_uncertain());
-        marks.iter().for_each(|m| tessellate(m, color, out));
+        out.extend(marks.iter().map(|&mark| match mark {
+            Mark::Rect { rect, radius } => Painted {
+                mark: Mark::Rect {
+                    rect,
+                    radius: if rounded { style.radius } else { radius },
+                },
+                fill: body,
+                stroke: if uncertain { Some(warning) } else { outline },
+                width: STYLED_LINE_WIDTH,
+            },
+            Mark::Ellipse { .. } => Painted {
+                mark,
+                fill: body,
+                stroke: if uncertain { Some(warning) } else { outline },
+                width: STYLED_LINE_WIDTH,
+            },
+            Mark::Bar { .. } => Painted {
+                mark,
+                fill: Some(bar),
+                stroke: None,
+                width: 0.0,
+            },
+            Mark::Line { .. } => Painted {
+                mark,
+                fill: None,
+                stroke: Some(if uncertain { warning } else { line }),
+                width: if uncertain {
+                    LINE_WIDTH
+                } else {
+                    STYLED_LINE_WIDTH.max(1.5)
+                },
+            },
+        }));
+    }
+}
+
+/// The colour of an element's label.
+pub fn label_color(s: &Recognized, look: &Look) -> [f32; 4] {
+    match look {
+        Look::Plain { light } => color(*light, s.is_uncertain()),
+        Look::Styled(style) => match s.shape_type {
+            ShapeType::Button | ShapeType::Icon => hex(style.on_accent()),
+            _ => hex(style.text),
+        },
+    }
+}
+
+/// Capsules for a painted mark's stroke and solid bar; filled boxes and ellipses are the renderer's
+/// (it draws them as shapes, not capsules).
+pub fn painted_segments(p: &Painted, out: &mut Vec<Segment>) {
+    match (p.mark, p.fill, p.stroke) {
+        (Mark::Bar { .. }, Some(fill), _) => tessellate(&p.mark, fill, LINE_WIDTH, out),
+        (Mark::Bar { .. }, None, _) => {}
+        (_, _, Some(stroke)) => tessellate(&p.mark, stroke, p.width, out),
+        (_, _, None) => {}
     }
 }
 
@@ -267,10 +419,69 @@ mod tests {
             ],
             ..Wireframe::default()
         };
+        let mut painted = Vec::new();
+        paint(&wire, &Look::Plain { light: false }, &mut painted);
         let mut out = Vec::new();
-        segments(&wire, false, &mut out);
+        painted.iter().for_each(|p| painted_segments(p, &mut out));
         assert!(out.iter().any(|s| s.color == WIRE));
         assert!(out.iter().any(|s| s.color == UNCERTAIN));
         assert!(out.iter().all(|s| s.a.is_finite() && s.b.is_finite()));
+    }
+
+    #[test]
+    fn styled_wireframe_paints_a_filled_mockup_bottom_to_top() {
+        let style = Style {
+            background: 0xffffff,
+            surface: 0xf4f5f7,
+            accent: 0x1f5fd1,
+            text: 0x16181e,
+            radius: 12.0,
+            spacing: 8.0,
+            line_height: None,
+        };
+        let button = shape(ShapeType::Button, Rect::new(20.0, 120.0, 140.0, 160.0));
+        let card = shape(ShapeType::Card, Rect::new(0.0, 0.0, 300.0, 200.0));
+        let shaky = Recognized::new(
+            ShapeType::Unknown,
+            Rect::new(160.0, 20.0, 200.0, 60.0),
+            0.3,
+            vec![],
+        );
+        // The button comes first in recognition order; the card must still be painted under it.
+        let wire = Wireframe {
+            shapes: vec![button.clone(), card, shaky],
+            ..Wireframe::default()
+        };
+        let mut out = Vec::new();
+        paint(&wire, &Look::Styled(style), &mut out);
+        let Mark::Rect { rect, .. } = out[0].mark else {
+            panic!()
+        };
+        assert_eq!(
+            rect,
+            Rect::new(-16.0, -16.0, 316.0, 216.0),
+            "backdrop, 2 × spacing around"
+        );
+        assert_eq!(out[0].fill, Some(hex(0xffffff)));
+        let fills: Vec<_> = out.iter().filter_map(|p| p.fill).collect();
+        assert_eq!(fills[1], hex(0xf4f5f7), "the card, under");
+        let accent = out
+            .iter()
+            .position(|p| p.fill == Some(hex(0x1f5fd1)))
+            .unwrap();
+        let card = out
+            .iter()
+            .position(|p| p.fill == Some(hex(0xf4f5f7)))
+            .unwrap();
+        assert!(card < accent, "the button over the card");
+        let Mark::Rect { radius, .. } = out[accent].mark else {
+            panic!()
+        };
+        assert_eq!(radius, 12.0, "the style's corners");
+        assert!(
+            out.iter().any(|p| p.stroke == Some(color(true, true))),
+            "uncertain elements keep their warning outline"
+        );
+        assert_eq!(label_color(&button, &Look::Styled(style)), hex(0xffffff));
     }
 }

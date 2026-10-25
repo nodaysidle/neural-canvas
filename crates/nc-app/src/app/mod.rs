@@ -7,17 +7,20 @@ mod access;
 mod library;
 pub mod settings;
 mod shell;
+mod style;
 
 use crate::UserEvent;
 use crate::chrome;
 use crate::clipboard::Clipboard;
 use crate::gpu::Gpu;
-use crate::workers::{Exporter, Recognizer};
+use crate::workers::{Exporter, Recognizer, Styler};
 use glam::Vec2;
 use nc_core::document::stroke_segments;
 use nc_core::kurbo::Affine;
+use nc_core::recognize::draw::{Look, Painted};
 use nc_core::recognize::{Wireframe, draw};
 use nc_core::select::{self, Gesture, Handle};
+use nc_core::style::Style;
 use nc_core::{
     Action, Command, Element, ElementId, ElementKind, FrameScheduler, Key as CoreKey, Predictor,
     Rect, Segment, Session, ShapeKind, Shortcut, Smoother, Stroke, Tool, Tools, ViewAnimation,
@@ -25,7 +28,7 @@ use nc_core::{
 };
 use nc_render::{Blend, Lifted, LiveStroke, Scene, WireLayer};
 use nc_shell::{INKS, Settings, WIDTHS};
-use nc_store::{ProjectInfo, Store, StoreEvent};
+use nc_store::{Preset, ProjectInfo, Store, StoreEvent};
 use nc_wayland::{Presented, SideChannel, ToolFrame, ToolKind, mono_ns};
 use std::collections::HashMap;
 use std::collections::{HashSet, VecDeque};
@@ -126,12 +129,20 @@ pub struct App {
     wire_level: f32,
     /// Raw sketch and wireframe side by side.
     split: bool,
-    /// The newest wireframe for the current revision, and its capsules (drawn for the light canvas
-    /// when `wire_light`).
+    /// The newest wireframe for the current revision, and how it is painted (for the light canvas
+    /// when `wire_light`, in `style` when one is applied).
     wireframe: Option<Arc<Wireframe>>,
     wire_light: bool,
-    wire_segments: Vec<Segment>,
+    wire_painted: Vec<Painted>,
     wire_serial: u64,
+    styler: Styler,
+    /// The style the open sketch's wireframe is drawn in, and the name a preset of it gets.
+    style: Option<Style>,
+    style_name: String,
+    /// A screenshot is being read.
+    style_reading: bool,
+    style_pending: Option<style::Pending>,
+    presets: Vec<Preset>,
     /// Revision last sent for recognition.
     requested: Option<u64>,
     /// "Review uncertain items": how many were visited, and the one shown.
@@ -238,11 +249,17 @@ impl App {
             clipboard: Clipboard::new(proxy.clone()),
             recognizer: Recognizer::new(proxy.clone()),
             exporter: Exporter::new(proxy.clone()),
+            styler: Styler::new(proxy.clone()),
+            style: None,
+            style_name: String::new(),
+            style_reading: false,
+            style_pending: None,
+            presets: Vec::new(),
             wire_level: 0.0,
             split: false,
             wireframe: None,
             wire_light: false,
-            wire_segments: Vec::new(),
+            wire_painted: Vec::new(),
             wire_serial: 0,
             requested: None,
             reviewed: 0,
@@ -375,12 +392,23 @@ impl App {
         self.redraw();
     }
 
-    /// Rebuilds the wireframe's capsules in the current theme's colours.
+    /// How the wireframe is coloured: the theme's wireframe colour, or the applied style.
+    fn look(&self) -> Look {
+        self.style.map_or(
+            Look::Plain {
+                light: !self.dark(),
+            },
+            Look::Styled,
+        )
+    }
+
+    /// Rebuilds the wireframe's marks in the current theme or style.
     fn redraw_wireframe(&mut self) {
         self.wire_light = !self.dark();
-        self.wire_segments.clear();
+        self.wire_painted.clear();
+        let look = self.look();
         if let Some(wire) = &self.wireframe {
-            draw::segments(wire, self.wire_light, &mut self.wire_segments);
+            draw::paint(wire, &look, &mut self.wire_painted);
         }
         self.wire_serial += 1;
     }
@@ -822,6 +850,7 @@ impl App {
                         wireframe,
                         background,
                         light,
+                        self.style,
                     );
                     let now = self.now();
                     self.exporting = Some(self.shell.toast(
@@ -1069,7 +1098,7 @@ impl App {
         });
         let wire = show_wire.then_some(WireLayer {
             serial: self.wire_serial,
-            segments: &self.wire_segments,
+            painted: &self.wire_painted,
         });
         let scene = Scene {
             doc: self.session.doc(),
@@ -1177,6 +1206,7 @@ impl ApplicationHandler<UserEvent> for App {
             gpu.window.request_redraw();
             self.gpu = Some(gpu);
             self.refresh_projects();
+            self.load_style();
             self.update_title();
         }
     }
@@ -1204,7 +1234,15 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Pasted(elements, centre) => self.pasted(elements, centre),
-            UserEvent::ClipboardFailed(e) => self.toast_error(e),
+            UserEvent::PastedImage(bytes) => self.paste_image(bytes),
+            UserEvent::StyleReading => {
+                self.style_reading = true;
+                self.redraw();
+            }
+            UserEvent::StyleRead(result) => self.style_read(result),
+            UserEvent::SketchStyle { sketch, result } => self.style_loaded(sketch, result),
+            UserEvent::Presets(result) => self.presets_loaded(result),
+            UserEvent::Failed(e) => self.toast_error(e),
             UserEvent::Projects(result) => {
                 self.projects_loaded(result);
                 self.update_title();

@@ -21,6 +21,19 @@ fn decode(c: f32) -> f32 {
     }
 }
 
+/// Linear RGBA from an sRGB hex colour (0xRRGGBB).
+pub fn hex(rgb: u32) -> [f32; 4] {
+    let channel = |shift: u32| decode(((rgb >> shift) & 0xff) as f32 / 255.0);
+    [channel(16), channel(8), channel(0), 1.0]
+}
+
+/// WCAG 2.1 contrast ratio of two opaque linear colours.
+pub fn contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let l = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let (hi, lo) = (l(a).max(l(b)), l(a).min(l(b)));
+    (hi + 0.05) / (lo + 0.05)
+}
+
 /// How a linear RGBA ink colour shows on the light canvas: in sRGB, luma `Y` becomes `1 − Y` while
 /// the chroma (`c − Y`) is kept, i.e. `c' = c + 1 − 2Y`.
 pub fn ink_on_light(c: [f32; 4]) -> [f32; 4] {

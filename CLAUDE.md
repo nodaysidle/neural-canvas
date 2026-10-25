@@ -14,7 +14,7 @@
   - Math & Geometry: `glam 0.34`, `bytemuck 1.x`, `kurbo`, `rstar`.
   - App Shell: own wgpu chrome layer (`nc-shell` layout, glyphon text, AccessKit); iced was ruled out in Phase 0.
 - **Workspace Crates**:
-  - `crates/nc-core`: Document model, stroke geometry, viewport transform math. Strictly NO GPU, NO windowing types.
+  - `crates/nc-core`: Document model, stroke geometry, viewport transform math, recognition, style mirror. Strictly NO GPU, NO windowing types.
   - `crates/nc-render`: `wgpu` canvas renderer (grid + instanced SDF capsule strokes via `canvas.wgsl`). Offscreen-tested.
   - `crates/nc-store`: SQLite (WAL) persistence on a dedicated store thread: one row per element, 300 ms debounce, schema migrations.
   - `crates/nc-export`: SVG writer (single source of truth) for the raw sketch and the wireframe; PDF via `svg2pdf`, PNG/JPEG via `resvg`.

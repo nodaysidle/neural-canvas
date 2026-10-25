@@ -9,9 +9,10 @@ pub mod theme;
 
 use glam::Vec2;
 use nc_core::recognize::QualityStatus;
+use nc_core::style::{Note, Style};
 use nc_core::{Rect, ShapeType, Tool};
 use nc_render::ui::{Font, Measure, UiImage, UiLayer, UiRect, UiScene, UiText, text_height};
-use nc_store::ProjectInfo;
+use nc_store::{Preset, ProjectInfo};
 use theme::Palette;
 use uuid::Uuid;
 
@@ -147,6 +148,14 @@ pub enum Hit {
     ChooseLocation,
     Quit,
     Pref(Pref),
+    /// The inspector's style section.
+    ImportStyle,
+    ApplyStyle,
+    DiscardStyle,
+    RemoveStyle,
+    SavePreset,
+    Preset(Uuid),
+    DeletePreset(Uuid),
     CloseDialog,
     /// Over chrome that does nothing itself: keeps the click off the canvas.
     Panel,
@@ -251,6 +260,19 @@ pub struct Status<'a> {
     pub loading: bool,
     /// The sketch store can't be opened: a blocking dialog covers everything (Mac bug #4).
     pub store_error: Option<&'a str>,
+    pub style: StyleView<'a>,
+}
+
+/// The style mirror, as the inspector shows it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StyleView<'a> {
+    /// A screenshot is being read.
+    pub reading: bool,
+    /// Read off a screenshot and not applied yet, with what the screenshot didn't show.
+    pub pending: Option<(&'a Style, &'a [Note])>,
+    /// The style the sketch's wireframe is drawn in.
+    pub applied: Option<&'a Style>,
+    pub presets: &'a [Preset],
 }
 
 /// A text field being typed into.
@@ -1378,6 +1400,7 @@ impl Shell {
             Inspect::Nothing => {
                 para(layer, &mut y, copy::NOTHING_SELECTED, p.muted);
                 para(layer, &mut y, &s.summary, p.muted);
+                Self::style_section(cx, layer, x, y, wrap, &s.style);
             }
             Inspect::Elements {
                 count,
@@ -1497,6 +1520,167 @@ impl Shell {
                     );
                 }
             }
+        }
+    }
+
+    /// The sketch's style: what was read off a screenshot (with its WCAG warnings) or what is applied,
+    /// import, and the saved presets.
+    fn style_section(
+        cx: &mut Ctx,
+        layer: &mut UiLayer,
+        x: f32,
+        mut y: f32,
+        wrap: f32,
+        v: &StyleView,
+    ) {
+        let p = cx.p;
+        layer.rects.push(UiRect {
+            rect: rect(x, y, wrap, 1.0),
+            fill: p.border,
+            border: [0.0; 4],
+            radius: 0.0,
+            border_width: 0.0,
+        });
+        y += 12.0;
+        cx.text(
+            layer,
+            copy::STYLE,
+            Vec2::new(x, y),
+            TITLE,
+            Font::SansStrong,
+            p.text,
+        );
+        y += 28.0;
+        let small = |cx: &mut Ctx, layer: &mut UiLayer, y: &mut f32, text: &str, color| {
+            layer.texts.push(UiText {
+                text: text.into(),
+                at: [x, *y],
+                size: SMALL,
+                font: Font::Sans,
+                color,
+                width: Some(wrap),
+            });
+            let lines = (cx.measure.width(text, SMALL, Font::Sans) / wrap)
+                .ceil()
+                .max(1.0);
+            *y += lines * (text_height(SMALL) + 2.0) + 6.0;
+        };
+        if v.reading {
+            small(cx, layer, &mut y, copy::READING_STYLE, p.muted);
+        }
+        match v.pending.map(|(s, _)| s).or(v.applied) {
+            Some(style) => {
+                let colours = [style.background, style.surface, style.accent, style.text];
+                for (role, c) in copy::STYLE_ROLES.into_iter().zip(colours) {
+                    let row = rect(x, y, wrap, 22.0);
+                    layer.rects.push(UiRect {
+                        rect: rect(x, y + 2.0, 18.0, 18.0),
+                        fill: theme::hex(c),
+                        border: p.border,
+                        radius: 4.0,
+                        border_width: 1.0,
+                    });
+                    let ty = y + (22.0 - text_height(SMALL)) / 2.0;
+                    cx.text(
+                        layer,
+                        role,
+                        Vec2::new(x + 28.0, ty),
+                        SMALL,
+                        Font::Sans,
+                        p.text,
+                    );
+                    cx.text(
+                        layer,
+                        &format!("#{c:06x}"),
+                        Vec2::new(x + 120.0, ty),
+                        SMALL,
+                        Font::Mono,
+                        p.muted,
+                    );
+                    cx.region(row, Hit::Panel, copy::swatch(role, c), Role::Label, false);
+                    y += 24.0;
+                }
+                y += 4.0;
+                let metrics = copy::style_metrics(style.radius, style.spacing, style.line_height);
+                small(cx, layer, &mut y, &metrics, p.muted);
+                if let Some((style, notes)) = v.pending {
+                    for c in style.failing() {
+                        small(
+                            cx,
+                            layer,
+                            &mut y,
+                            &copy::low_contrast(c.pair, c.ratio),
+                            p.warning,
+                        );
+                    }
+                    for n in notes {
+                        small(cx, layer, &mut y, copy::style_note(*n), p.warning);
+                    }
+                }
+                let buttons: [(&str, Hit, bool); 2] = if v.pending.is_some() {
+                    [
+                        (copy::APPLY_STYLE, Hit::ApplyStyle, true),
+                        (copy::DISCARD_STYLE, Hit::DiscardStyle, false),
+                    ]
+                } else {
+                    [
+                        (copy::SAVE_PRESET, Hit::SavePreset, false),
+                        (copy::REMOVE_STYLE, Hit::RemoveStyle, false),
+                    ]
+                };
+                let mut bx = x - 8.0;
+                for (label, hit, primary) in buttons {
+                    bx += cx.text_button(layer, Vec2::new(bx, y), label, hit, primary) + 4.0;
+                }
+                y += ROW + 6.0;
+            }
+            None if !v.reading => small(cx, layer, &mut y, copy::STYLE_HINT, p.muted),
+            None => {}
+        }
+        cx.text_button(
+            layer,
+            Vec2::new(x - 8.0, y),
+            copy::IMPORT_STYLE,
+            Hit::ImportStyle,
+            false,
+        );
+        y += ROW + 12.0;
+        if v.presets.is_empty() {
+            return;
+        }
+        cx.text(
+            layer,
+            copy::PRESETS,
+            Vec2::new(x, y),
+            SMALL,
+            Font::SansStrong,
+            p.muted,
+        );
+        y += 22.0;
+        for preset in v.presets {
+            let applied = v.applied == Some(&preset.style) && v.pending.is_none();
+            let del_w = cx.measure.width(copy::DELETE_PRESET, BODY, Font::Sans) + 16.0;
+            cx.button(
+                layer,
+                rect(x - 8.0, y, wrap + 8.0 - del_w - 4.0, ROW),
+                &preset.name,
+                None,
+                Hit::Preset(preset.id),
+                applied,
+                Role::ListItem { selected: applied },
+            );
+            cx.text_button(
+                layer,
+                Vec2::new(x + wrap - del_w, y),
+                copy::DELETE_PRESET,
+                Hit::DeletePreset(preset.id),
+                false,
+            );
+            // One "Delete" per row on screen; a screen reader needs to hear which.
+            if let Some(r) = cx.regions.last_mut() {
+                r.label = copy::delete_preset(&preset.name);
+            }
+            y += ROW + 2.0;
         }
     }
 
@@ -1871,6 +2055,7 @@ mod tests {
             settings: Settings::default(),
             loading: false,
             store_error: None,
+            style: StyleView::default(),
         }
     }
 
@@ -1895,6 +2080,85 @@ mod tests {
 
     fn built(shell: &mut Shell, s: &Status) {
         shell.build(s, Vec2::new(1280.0, 800.0), &mut Fixed);
+    }
+
+    /// With nothing selected, the inspector shows the style: a screenshot's read with its WCAG
+    /// warnings and Apply, or the applied style with its presets.
+    #[test]
+    fn inspector_shows_style_warnings_and_presets() {
+        let (projects, sketch) = projects();
+        let mut shell = Shell::new();
+        shell.inspector = true;
+        let pale = Style {
+            background: 0xffffff,
+            surface: 0xf4f5f7,
+            accent: 0x9fc4ff,
+            text: 0xaaaaaa,
+            radius: 8.0,
+            spacing: 8.0,
+            line_height: None,
+        };
+        let notes = [Note::NoBoxes];
+        let mut s = status(&projects, sketch);
+        s.style.pending = Some((&pale, &notes));
+        built(&mut shell, &s);
+        let texts: Vec<&str> = shell
+            .scene()
+            .base
+            .texts
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect();
+        let warning = copy::low_contrast(
+            nc_core::style::Pair::TextOnBackground,
+            pale.check(nc_core::style::Pair::TextOnBackground).ratio,
+        );
+        assert!(texts.contains(&warning.as_str()), "{texts:?}");
+        assert!(texts.contains(&copy::style_note(Note::NoBoxes)));
+        assert!(texts.contains(&"#9fc4ff"));
+        find(&shell, Hit::ApplyStyle);
+        find(&shell, Hit::DiscardStyle);
+        assert!(shell.regions().iter().any(|r| r.label == "Accent #9fc4ff"));
+
+        let presets = [Preset {
+            id: Uuid::from_u128(3),
+            name: "Files".into(),
+            style: pale,
+        }];
+        let mut s = status(&projects, sketch);
+        s.style.applied = Some(&pale);
+        s.style.presets = &presets;
+        built(&mut shell, &s);
+        find(&shell, Hit::RemoveStyle);
+        find(&shell, Hit::SavePreset);
+        assert!(shell.regions().iter().all(|r| r.hit != Hit::ApplyStyle));
+        let row = shell
+            .regions()
+            .iter()
+            .find(|r| r.hit == Hit::Preset(presets[0].id))
+            .unwrap();
+        assert_eq!(
+            row.role,
+            Role::ListItem { selected: true },
+            "the applied preset is marked"
+        );
+        let del = shell
+            .regions()
+            .iter()
+            .find(|r| r.hit == Hit::DeletePreset(presets[0].id))
+            .unwrap();
+        assert_eq!(del.label, copy::delete_preset("Files"));
+        let texts: Vec<&str> = shell
+            .scene()
+            .base
+            .texts
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect();
+        assert!(
+            !texts.contains(&warning.as_str()),
+            "warnings belong to the review before applying"
+        );
     }
 
     fn find(shell: &Shell, hit: Hit) -> Bounds {

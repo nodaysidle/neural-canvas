@@ -26,6 +26,8 @@ const LIFTED: u32 = 1u;
 const WIRE: u32 = 2u;
 const CHROME: u32 = 4u;
 const INK_ON_TOP: u32 = 8u;
+const FILL: u32 = 16u;     // a filled rounded box from a to b, half_width = corner radius
+const ELLIPSE: u32 = 32u;  // with FILL: the ellipse inscribed in that box
 
 fn lift(p: vec2f) -> vec2f {
     let m = view.lift_abcd;
@@ -79,6 +81,7 @@ struct SegOut {
     @location(2) b: vec2f,
     @location(3) half_width: f32,
     @location(4) color: vec4f,
+    @location(5) @interpolate(flat) flags: u32,
 }
 
 @vertex fn vs_seg(@builtin(vertex_index) vi: u32, s: Seg) -> SegOut {
@@ -100,17 +103,26 @@ struct SegOut {
     let n = vec2f(-t.y, t.x);
     let r = hw + px_world;                        // 1 px margin for the AA ramp
     let c = corners[vi];
-    let p = mix(sa - t * r, sb + t * r, c.x) + n * r * c.y;
+    var p = mix(sa - t * r, sb + t * r, c.x) + n * r * c.y;
+    if (s.flags & FILL) != 0u {
+        // The box itself, plus the AA margin.
+        p = mix(sa - vec2f(px_world), sb + vec2f(px_world), vec2f(c.x, c.y * 0.5 + 0.5));
+    }
 
     var o: SegOut;
     o.pos = world_to_clip(p);
     o.world = p;
     o.a = sa;
     o.b = sb;
-    o.half_width = hw;
+    o.half_width = select(hw, s.half_width, (s.flags & FILL) != 0u);
+    o.flags = s.flags;
     var layer = view.alpha.x;
     if (s.flags & WIRE) != 0u {
         layer = view.alpha.y;
+        // A styled wireframe's fills let the sketch show through while the sketch is shown too.
+        if (s.flags & FILL) != 0u {
+            layer *= 1.0 - 0.5 * view.alpha.x;
+        }
     } else if (s.flags & (CHROME | INK_ON_TOP)) != 0u {
         layer = 1.0;
     }
@@ -124,9 +136,25 @@ struct SegOut {
 }
 
 @fragment fn fs_seg(i: SegOut) -> @location(0) vec4f {
-    let ab = i.b - i.a;
-    let h = clamp(dot(i.world - i.a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
-    let dist = length(i.world - i.a - ab * h) - i.half_width;
+    var dist: f32;
+    if (i.flags & FILL) != 0u {
+        let half = max((i.b - i.a) * 0.5, vec2f(1e-4));
+        let p = i.world - (i.a + i.b) * 0.5;
+        if (i.flags & ELLIPSE) != 0u {
+            // Distance to an ellipse, first-order approximation (exact on circles).
+            let k0 = length(p / half);
+            let k1 = length(p / (half * half));
+            dist = k0 * (k0 - 1.0) / max(k1, 1e-6);
+        } else {
+            let r = clamp(i.half_width, 0.0, min(half.x, half.y));
+            let q = abs(p) - half + r;
+            dist = length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
+        }
+    } else {
+        let ab = i.b - i.a;
+        let h = clamp(dot(i.world - i.a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+        dist = length(i.world - i.a - ab * h) - i.half_width;
+    }
     let alpha = clamp(0.5 - dist * view.scale * view.px_per_pt, 0.0, 1.0);
     return vec4f(i.color.rgb, i.color.a * alpha);
 }

@@ -6,6 +6,7 @@ pub mod ui;
 use bytemuck::{Pod, Zeroable};
 use nc_core::document::{element_segments, stroke_segment_count, stroke_segments_from};
 use nc_core::kurbo::Affine;
+use nc_core::recognize::draw::{Mark, Painted, painted_segments};
 use nc_core::{Document, Element, ElementId, ElementKind, Segment, Stroke, Viewport};
 use std::collections::{HashMap, HashSet};
 use std::mem::{offset_of, size_of};
@@ -125,6 +126,10 @@ pub const CHROME: u32 = 4;
 /// Ink drawn over everything (the live stroke, predicted ink, a shape being dragged): always opaque,
 /// lightness-inverted on the light canvas like all ink.
 pub const INK_ON_TOP: u32 = 8;
+/// A filled rounded box from `a` (top-left) to `b` (bottom-right), `half_width` its corner radius.
+pub const FILL: u32 = 16;
+/// With [`FILL`]: the ellipse inscribed in the box instead.
+pub const ELLIPSE: u32 = 32;
 
 /// How much of the raw sketch and of the wireframe to show, 0..=1 each.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -144,11 +149,11 @@ impl Blend {
     };
 }
 
-/// The wireframe overlay's capsules. `serial` changes whenever they do, so they upload once.
+/// The wireframe overlay, bottom to top. `serial` changes whenever it does, so it uploads once.
 #[derive(Clone, Copy)]
 pub struct WireLayer<'a> {
     pub serial: u64,
-    pub segments: &'a [Segment],
+    pub painted: &'a [Painted],
 }
 
 /// Elements being moved or resized: drawn where `transform` puts them, while the document still holds
@@ -608,14 +613,34 @@ impl Renderer {
         if self.wire_serial == Some(wire.serial) {
             return;
         }
-        let n = wire.segments.len() as u32;
+        // Painter's order: each mark's fill, then its outline.
+        self.scratch.clear();
+        let mut segments = Vec::new();
+        for p in wire.painted {
+            let fill = match (p.mark, p.fill) {
+                (Mark::Rect { rect, radius }, Some(c)) => Some((rect, radius, c, FILL)),
+                (Mark::Ellipse { rect }, Some(c)) => Some((rect, 0.0, c, FILL | ELLIPSE)),
+                _ => None,
+            };
+            if let Some((r, radius, color, kind)) = fill {
+                self.scratch.push(SegmentInstance {
+                    a: [r.x0 as f32, r.y0 as f32],
+                    b: [r.x1 as f32, r.y1 as f32],
+                    half_width: radius,
+                    color,
+                    flags: WIRE | kind,
+                });
+            }
+            segments.clear();
+            painted_segments(p, &mut segments);
+            self.scratch
+                .extend(segments.iter().copied().map(flagged(WIRE)));
+        }
+        let n = self.scratch.len() as u32;
         if n > self.wire_capacity {
             self.wire_capacity = n.next_power_of_two();
             self.wire = Self::instance_buffer(device, self.wire_capacity);
         }
-        self.scratch.clear();
-        self.scratch
-            .extend(wire.segments.iter().copied().map(flagged(WIRE)));
         if n > 0 {
             queue.write_buffer(&self.wire, 0, bytemuck::cast_slice(&self.scratch));
         }

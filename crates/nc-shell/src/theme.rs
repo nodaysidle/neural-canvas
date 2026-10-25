@@ -3,18 +3,7 @@
 
 use nc_render::CanvasTheme;
 
-/// Linear RGBA from an sRGB hex colour.
-pub fn hex(rgb: u32) -> [f32; 4] {
-    let channel = |shift: u32| {
-        let c = ((rgb >> shift) & 0xff) as f32 / 255.0;
-        if c <= 0.040_45 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    [channel(16), channel(8), channel(0), 1.0]
-}
+pub use nc_core::theme::{contrast, hex};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
@@ -74,13 +63,6 @@ impl Palette {
     pub fn of(dark: bool) -> Self {
         if dark { Self::dark() } else { Self::light() }
     }
-}
-
-/// WCAG 2.1 contrast ratio of two opaque linear colours.
-pub fn contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
-    let l = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-    let (hi, lo) = (l(a).max(l(b)), l(a).min(l(b)));
-    (hi + 0.05) / (lo + 0.05)
 }
 
 #[cfg(test)]

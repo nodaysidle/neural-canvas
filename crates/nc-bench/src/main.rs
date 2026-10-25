@@ -2,13 +2,14 @@
 //!
 //! ```text
 //! nc-bench offscreen [frames]                    renderer cost vs scene size, headless, 2560x1440
-//! nc-bench window <panzoom|draw|move|input> <fifo|mailbox|immediate> [secs] [latch]
+//! nc-bench window <panzoom|draw|move|input> <fifo|mailbox|immediate> [secs] [latch] [recognize] [style=PNG] [shell]
 //!                                                latch: `auto` (the app's adaptive schedule) or a fixed
 //!                                                delay in ms after the frame callback (default 0)
 //! nc-bench tablet [secs]                         log zwp_tablet_v2 vs winit pointer events
 //! nc-bench drive <secs> [hz] [strokes] | script < commands            virtual pointer circling the output; `strokes` holds the
 //!                                                left button to draw arcs (end-to-end app checks)
 //! nc-bench samples                               per-sample cost of the input hot path
+//! nc-bench style <out-dir> <screenshot...>       style mirror on real screenshots, side-by-side images
 //! nc-bench store [dir]                           S2k save/load cost against a real file; with `dir`, keeps
 //!                                                `dir/neuralcanvas.db` for the app to open
 //! ```
@@ -18,6 +19,7 @@ mod fixtures;
 mod offscreen;
 mod samples;
 mod store;
+mod style;
 mod window;
 
 use window::{Config, Latch, Scenario};
@@ -54,6 +56,10 @@ fn main() {
                     _ => Latch::Fixed(std::time::Duration::from_secs_f64(secs(4, 0.0) / 1e3)),
                 },
                 recognize: args[5.min(args.len())..].iter().any(|a| a == "recognize"),
+                style: args[5.min(args.len())..]
+                    .iter()
+                    .find_map(|a| a.strip_prefix("style="))
+                    .map(Into::into),
                 shell: args[5.min(args.len())..].iter().any(|a| a == "shell"),
             });
         }
@@ -112,15 +118,17 @@ fn main() {
             secs: secs(1, 15.0),
             latch: Latch::Fixed(std::time::Duration::ZERO),
             recognize: false,
+            style: None,
             shell: false,
         }),
+        Some("style") if args.len() > 2 => style::run(args[1].as_ref(), &args[2..]),
         _ => usage(),
     }
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: nc-bench offscreen [frames]\n       nc-bench window <panzoom|draw|move|input> <fifo|mailbox|immediate> [secs] [auto|late_ms] [recognize] [shell]\n       nc-bench tablet [secs]\n       nc-bench drive <secs> [hz] [strokes] | script < commands\n       nc-bench fixtures <pages | script SEED PAGE X Y MANIFEST | extract MANIFEST DB DIR>\n       nc-bench recognize\n       nc-bench samples\n       nc-bench store [dir]"
+        "usage: nc-bench offscreen [frames]\n       nc-bench window <panzoom|draw|move|input> <fifo|mailbox|immediate> [secs] [auto|late_ms] [recognize] [style=PNG] [shell]\n       nc-bench tablet [secs]\n       nc-bench drive <secs> [hz] [strokes] | script < commands\n       nc-bench fixtures <pages | script SEED PAGE X Y MANIFEST | extract MANIFEST DB DIR>\n       nc-bench recognize\n       nc-bench samples\n       nc-bench store [dir]\n       nc-bench style <out-dir> <screenshot...>"
     );
     std::process::exit(2);
 }

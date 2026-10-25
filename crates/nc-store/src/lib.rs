@@ -4,5 +4,5 @@
 mod db;
 mod thread;
 
-pub use db::{Db, ProjectInfo, Result, SCHEMA_VERSION, SketchInfo, StoreError};
+pub use db::{Db, Preset, ProjectInfo, Result, SCHEMA_VERSION, SketchInfo, StoreError};
 pub use thread::{DEBOUNCE, RETRY, Store, StoreEvent};

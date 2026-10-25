@@ -29,7 +29,7 @@ by raw winit (today) or an iced `shader` widget (Phase 5) unchanged.
 
 ```
 crates/
-  nc-core/     document, strokes, viewport maths. No GPU, no window. Unit-tested.
+  nc-core/     document, strokes, viewport maths, recognition, style mirror. No GPU, no window.
   nc-render/   wgpu renderer: grid, instanced SDF capsule strokes, UI pass (rects, images, glyphon text).
   nc-store/    SQLite (WAL) persistence on its own thread: one row per element, 300 ms debounce.
   nc-export/   SVG writer; PDF (svg2pdf), PNG and JPEG (resvg); raw sketch and wireframe.

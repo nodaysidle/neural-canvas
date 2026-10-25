@@ -1,6 +1,7 @@
 //! The SQLite side: schema, migrations, and incremental writes (one row per element). Used only by the
 //! store thread and by tests; never by the UI thread.
 
+use nc_core::style::Style;
 use nc_core::{Document, Element, ElementId, ElementKind};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
@@ -45,6 +46,19 @@ const MIGRATIONS: &[Migration] = &[
     ),
     Migration::Code(add_stroke_pressure),
     Migration::Code(add_recognized_label),
+    // Style mirror: saved styles, and the style each sketch's wireframe is drawn in (postcard-encoded
+    // nc_core::style::Style; NULL draws it plain).
+    Migration::Sql(
+        "
+    CREATE TABLE style_presets (
+        id         BLOB PRIMARY KEY,
+        name       TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        style      BLOB NOT NULL
+    );
+    ALTER TABLE sketches ADD COLUMN style BLOB;
+",
+    ),
 ];
 
 /// Element encodings as they were stored by older schema versions, frozen. When `ElementKind`'s
@@ -179,6 +193,14 @@ pub struct SketchInfo {
     pub name: String,
 }
 
+/// A saved style.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Preset {
+    pub id: Uuid,
+    pub name: String,
+    pub style: Style,
+}
+
 #[derive(Debug)]
 pub enum StoreError {
     Io(std::io::Error),
@@ -197,6 +219,8 @@ pub enum StoreError {
         element: ElementId,
         reason: String,
     },
+    /// A stored style could not be decoded.
+    BadStyle(String),
     /// The store thread is gone.
     Closed,
 }
@@ -223,6 +247,7 @@ impl std::fmt::Display for StoreError {
                 f,
                 "sketch {sketch} has an unreadable element {element}: {reason}"
             ),
+            Self::BadStyle(reason) => write!(f, "a saved style is unreadable: {reason}"),
             Self::Closed => write!(f, "the store has shut down"),
         }
     }
@@ -340,6 +365,69 @@ impl Db {
             "UPDATE sketches SET name = ?2 WHERE id = ?1",
             params![id, name],
         )?;
+        Ok(())
+    }
+
+    /// Saves `style` as a preset called `name`.
+    pub fn save_preset(&mut self, name: &str, style: &Style) -> Result<Uuid> {
+        let id = Uuid::new_v4();
+        self.conn.execute(
+            "INSERT INTO style_presets (id, name, created_at, style) VALUES (?1, ?2, ?3, ?4)",
+            params![id, name, now_ms(), encode_style(style)],
+        )?;
+        Ok(id)
+    }
+
+    /// Presets, oldest first.
+    pub fn presets(&mut self) -> Result<Vec<Preset>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, style FROM style_presets ORDER BY created_at, rowid")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, Uuid>(0)?, r.get(1)?, r.get::<_, Vec<u8>>(2)?))
+        })?;
+        rows.map(|row| {
+            let (id, name, blob) = row?;
+            Ok(Preset {
+                id,
+                name,
+                style: decode_style(&blob)?,
+            })
+        })
+        .collect()
+    }
+
+    pub fn delete_preset(&mut self, id: Uuid) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM style_presets WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// The style a sketch's wireframe is drawn in; `None` draws it plain.
+    pub fn sketch_style(&mut self, sketch: Uuid) -> Result<Option<Style>> {
+        let blob: Option<Option<Vec<u8>>> = self
+            .conn
+            .query_row(
+                "SELECT style FROM sketches WHERE id = ?1",
+                params![sketch],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match blob {
+            None => Err(StoreError::UnknownSketch(sketch)),
+            Some(None) => Ok(None),
+            Some(Some(blob)) => decode_style(&blob).map(Some),
+        }
+    }
+
+    pub fn set_sketch_style(&mut self, sketch: Uuid, style: Option<&Style>) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE sketches SET style = ?2 WHERE id = ?1",
+            params![sketch, style.map(encode_style)],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::UnknownSketch(sketch));
+        }
         Ok(())
     }
 
@@ -481,6 +569,14 @@ impl Db {
         self.saved.insert(sketch, saved);
         Ok(())
     }
+}
+
+fn encode_style(style: &Style) -> Vec<u8> {
+    postcard::to_allocvec(style).expect("a style always encodes")
+}
+
+fn decode_style(blob: &[u8]) -> Result<Style> {
+    postcard::from_bytes(blob).map_err(|e| StoreError::BadStyle(e.to_string()))
 }
 
 fn migrate(conn: &mut Connection) -> Result<()> {
@@ -628,6 +724,10 @@ mod tests {
                     params![sketch, id, blob],
                 )
                 .unwrap();
+            // Back to the v2 schema: undo what later migrations added.
+            db.conn
+                .execute_batch("DROP TABLE style_presets; ALTER TABLE sketches DROP COLUMN style;")
+                .unwrap();
             db.conn.pragma_update(None, "user_version", 2).unwrap();
         }
         let mut db = Db::open(&path).unwrap();
@@ -665,6 +765,55 @@ mod tests {
             .collect();
         assert_eq!(sketches, [(first, "Login screen"), (second, "Second")]);
         assert!(projects[1].sketches.is_empty());
+    }
+
+    #[test]
+    fn presets_and_sketch_styles_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nc.db");
+        let mut db = Db::open(&path).unwrap();
+        let sketch = db.last_or_new_sketch().unwrap();
+        let style = Style {
+            background: 0xffffff,
+            surface: 0xf4f5f7,
+            accent: 0x1f5fd1,
+            text: 0x16181e,
+            radius: 8.0,
+            spacing: 8.0,
+            line_height: Some(20.0),
+        };
+        assert_eq!(db.sketch_style(sketch).unwrap(), None, "plain by default");
+        let a = db.save_preset("Files", &style).unwrap();
+        let b = db
+            .save_preset(
+                "Pinta",
+                &Style {
+                    radius: 0.0,
+                    ..style
+                },
+            )
+            .unwrap();
+        db.set_sketch_style(sketch, Some(&style)).unwrap();
+        drop(db);
+        let mut db = Db::open(&path).unwrap();
+        let presets = db.presets().unwrap();
+        assert_eq!(
+            presets
+                .iter()
+                .map(|p| (p.id, p.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(a, "Files"), (b, "Pinta")]
+        );
+        assert_eq!(presets[1].style.radius, 0.0);
+        assert_eq!(db.sketch_style(sketch).unwrap(), Some(style));
+        db.delete_preset(a).unwrap();
+        db.set_sketch_style(sketch, None).unwrap();
+        assert_eq!(db.presets().unwrap().len(), 1);
+        assert_eq!(db.sketch_style(sketch).unwrap(), None);
+        assert!(matches!(
+            db.set_sketch_style(Uuid::new_v4(), None),
+            Err(StoreError::UnknownSketch(_))
+        ));
     }
 
     #[test]

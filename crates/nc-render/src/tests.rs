@@ -354,11 +354,14 @@ fn wireframe_blend_and_side_by_side() {
         6.0,
         RED,
     )]);
-    let wire = [Segment {
-        a: Vec2::new(4.0, 48.0),
-        b: Vec2::new(60.0, 48.0),
-        half_width: 3.0,
-        color: BLUE,
+    let wire = [Painted {
+        mark: Mark::Line {
+            a: Vec2::new(4.0, 48.0),
+            b: Vec2::new(60.0, 48.0),
+        },
+        fill: None,
+        stroke: Some(BLUE),
+        width: 6.0,
     }];
     let mut r = Renderer::new(&gpu.device, FORMAT);
     let v = Viewport::default();
@@ -366,7 +369,7 @@ fn wireframe_blend_and_side_by_side() {
         let scene = Scene {
             wire: Some(WireLayer {
                 serial: 1,
-                segments: &wire,
+                painted: &wire,
             }),
             blend,
             split,
@@ -406,6 +409,60 @@ fn wireframe_blend_and_side_by_side() {
     assert!(
         split.at(48, 48)[2] > 240 && split.at(48, 16)[0] < 80,
         "right: wireframe"
+    );
+}
+
+/// A styled wireframe fills boxes (rounded corners left empty) and ellipses, in painter's order: a
+/// box drawn later covers one drawn earlier, and its outline sits on its own fill.
+#[test]
+fn wireframe_fills_rounded_boxes_and_ellipses() {
+    let Some(gpu) = Gpu::new() else { return };
+    let doc = Document::default();
+    let rect = |x0, y0, x1, y1| nc_core::Rect::new(x0, y0, x1, y1);
+    let wire = [
+        Painted {
+            mark: Mark::Rect {
+                rect: rect(4.0, 4.0, 60.0, 60.0),
+                radius: 16.0,
+            },
+            fill: Some(BLUE),
+            stroke: None,
+            width: 0.0,
+        },
+        Painted {
+            mark: Mark::Ellipse {
+                rect: rect(24.0, 24.0, 40.0, 40.0),
+            },
+            fill: Some(RED),
+            stroke: Some([0.0, 1.0, 0.0, 1.0]),
+            width: 2.0,
+        },
+    ];
+    let mut r = Renderer::new(&gpu.device, FORMAT);
+    let scene = Scene {
+        wire: Some(WireLayer {
+            serial: 1,
+            painted: &wire,
+        }),
+        blend: Blend::WIRE,
+        ..Scene::doc(&doc)
+    };
+    let f = gpu.frame_with(&mut r, &scene, &Viewport::default(), 64, 1.0);
+    assert!(f.at(12, 32)[2] > 240, "box filled: {:?}", f.at(12, 32));
+    assert!(
+        f.at(6, 6)[2] < 40,
+        "rounded corner left empty: {:?}",
+        f.at(6, 6)
+    );
+    assert!(
+        f.at(32, 32)[0] > 240 && f.at(32, 32)[2] < 40,
+        "ellipse on top"
+    );
+    assert!(f.at(24, 24)[2] > 240, "outside the ellipse, inside its box");
+    assert!(
+        f.at(32, 24)[1] > 200,
+        "outline over its fill: {:?}",
+        f.at(32, 24)
     );
 }
 

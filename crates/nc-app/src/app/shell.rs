@@ -187,6 +187,15 @@ impl App {
             settings: self.settings,
             loading: self.loading,
             store_error: self.store_error.as_deref(),
+            style: nc_shell::StyleView {
+                reading: self.style_reading,
+                pending: self
+                    .style_pending
+                    .as_ref()
+                    .map(|p| (&p.extracted.style, p.extracted.notes.as_slice())),
+                applied: self.style.as_ref(),
+                presets: &self.presets,
+            },
         };
         self.shell.build(&status, size, &mut gpu.ui);
         let mut labels = std::mem::take(self.shell.canvas_layer());
@@ -204,7 +213,7 @@ impl App {
         };
         let alpha = if self.split { 1.0 } else { self.blend().wire };
         let dx = if self.split { self.pane_size().x } else { 0.0 };
-        let light = !self.dark();
+        let look = self.look();
         let size = draw::LABEL_SIZE * self.viewport.scale;
         if !(4.0..=200.0).contains(&size) {
             return; // too small to read, or absurdly large
@@ -213,7 +222,7 @@ impl App {
             let Some((at, centred)) = draw::label_anchor(s) else {
                 continue;
             };
-            let mut color = draw::color(light, s.is_uncertain());
+            let mut color = draw::label_color(s, &look);
             color[3] *= alpha;
             let p = self.viewport.world_to_screen(at);
             let w = measure.width(&s.label, size, Font::Sans);
@@ -398,6 +407,13 @@ impl App {
                 self.persist();
             }
             Hit::ChooseLocation => self.choose_store_location(),
+            Hit::ImportStyle => self.import_style(),
+            Hit::ApplyStyle => self.apply_style(),
+            Hit::DiscardStyle => self.style_pending = None,
+            Hit::RemoveStyle => self.set_style(None),
+            Hit::SavePreset => self.save_preset(),
+            Hit::Preset(id) => self.apply_preset(id),
+            Hit::DeletePreset(id) => self.delete_preset(id),
             Hit::Quit => {
                 let _ = self.proxy.send_event(crate::UserEvent::Quit);
             }

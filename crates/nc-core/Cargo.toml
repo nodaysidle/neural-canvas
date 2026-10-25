@@ -18,7 +18,11 @@ postcard = { version = "1", default-features = false, features = ["use-std"] }
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 ramer_douglas_peucker = "0.2"
 mint = "0.5"
+# Style mirror: k-means palette in CIELAB.
+kmeans_colors = { version = "0.7", default-features = false, features = ["palette_color"] }
+palette = { version = "0.7", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 proptest.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
 serde_json = "1"

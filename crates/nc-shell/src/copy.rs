@@ -2,6 +2,7 @@
 //! Plain, specific, sentence case; no internal names, no debug text, no em dashes.
 
 use nc_core::recognize::QualityStatus;
+use nc_core::style::{Note, Pair};
 use nc_core::{ShapeKind, Tool};
 
 pub const APP_NAME: &str = "NeuralCanvas";
@@ -234,6 +235,77 @@ pub fn project_failed(reason: &str) -> String {
     format!("Could not update projects: {reason}")
 }
 
+/// Style mirror: the inspector's style section.
+pub const STYLE: &str = "Style";
+pub const STYLE_HINT: &str =
+    "Take colours, corners and spacing from a screenshot of an app, or paste one with Ctrl+V.";
+pub const IMPORT_STYLE: &str = "Import screenshot…";
+pub const IMPORT_STYLE_TITLE: &str = "Choose a screenshot to take a style from";
+pub const READING_STYLE: &str = "Reading the screenshot…";
+pub const APPLY_STYLE: &str = "Apply";
+pub const DISCARD_STYLE: &str = "Discard";
+pub const REMOVE_STYLE: &str = "Remove style";
+pub const SAVE_PRESET: &str = "Save as preset";
+pub const PRESETS: &str = "Presets";
+pub const DELETE_PRESET: &str = "Delete";
+pub const STYLE_ROLES: [&str; 4] = ["Background", "Surface", "Accent", "Text"];
+pub const PASTED_SCREENSHOT: &str = "Pasted screenshot";
+pub const IMAGE_FILTER: &str = "PNG and JPEG images";
+
+/// A swatch, as a screen reader announces it.
+pub fn swatch(role: &str, rgb: u32) -> String {
+    format!("{role} #{rgb:06x}")
+}
+
+pub fn style_metrics(radius: f32, spacing: f32, line_height: Option<f32>) -> String {
+    let base = format!("Corners {radius:.0} px · spacing {spacing:.0} px");
+    match line_height {
+        Some(l) => format!("{base} · lines {l:.0} px"),
+        None => base,
+    }
+}
+
+fn pair_name(pair: Pair) -> &'static str {
+    match pair {
+        Pair::TextOnBackground => "Text on background",
+        Pair::TextOnSurface => "Text on surface",
+        Pair::LabelOnAccent => "Button labels",
+        Pair::AccentOnBackground => "Accent on background",
+        Pair::AccentOnSurface => "Accent on surface",
+    }
+}
+
+/// A WCAG 2.1 AA pair the style fails.
+pub fn low_contrast(pair: Pair, ratio: f32) -> String {
+    format!(
+        "{}: {ratio:.1}:1, below the {}:1 WCAG AA asks for",
+        pair_name(pair),
+        pair.minimum()
+    )
+}
+
+pub fn style_note(note: Note) -> &'static str {
+    match note {
+        Note::NoAccent => "No accent colour found: buttons use the text colour",
+        Note::NoSurface => "No panel colour found: cards use a shade of the background",
+        Note::NoBoxes => "No cards or buttons to measure: square corners and 8 px spacing assumed",
+        Note::FewGaps => "Too few gaps between boxes to measure: 8 px spacing assumed",
+        Note::NoText => "No text found: text is black or white, whichever reads",
+    }
+}
+
+pub fn delete_preset(name: &str) -> String {
+    format!("Delete preset “{name}”")
+}
+
+pub fn style_failed(reason: &str) -> String {
+    format!("Could not read the screenshot: {reason}")
+}
+
+pub fn style_saved(name: &str) -> String {
+    format!("Saved “{name}” as a preset")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +367,19 @@ mod tests {
             TIP_SHORTCUTS,
             TIP_REVIEW,
             TIP_ZOOM,
+            STYLE,
+            STYLE_HINT,
+            IMPORT_STYLE,
+            IMPORT_STYLE_TITLE,
+            READING_STYLE,
+            APPLY_STYLE,
+            DISCARD_STYLE,
+            REMOVE_STYLE,
+            SAVE_PRESET,
+            PRESETS,
+            DELETE_PRESET,
+            PASTED_SCREENSHOT,
+            IMAGE_FILTER,
         ]
         .map(String::from)
         .to_vec();
@@ -342,7 +427,24 @@ mod tests {
             sketch_failed("damaged"),
             project_failed("disk full"),
             store_unavailable("permission denied"),
+            swatch("Accent", 0x1f5fd1),
+            style_metrics(8.0, 8.0, Some(20.0)),
+            style_metrics(0.0, 4.0, None),
+            style_failed("unsupported format"),
+            style_saved("Files"),
+            delete_preset("Files"),
         ]);
+        out.extend(STYLE_ROLES.map(String::from));
+        out.extend(Pair::ALL.map(|p| low_contrast(p, 2.95)));
+        for n in [
+            Note::NoAccent,
+            Note::NoSurface,
+            Note::NoBoxes,
+            Note::FewGaps,
+            Note::NoText,
+        ] {
+            out.push(style_note(n).into());
+        }
         // Menu labels come from the actions themselves.
         let history = nc_core::History::default();
         for key in "zyacdveuw[]012=+-bi,/".chars() {

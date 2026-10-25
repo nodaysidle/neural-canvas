@@ -26,7 +26,8 @@ pub enum UserEvent {
     Quit,
     /// Elements read from the clipboard, to be centred on the point (world units).
     Pasted(Vec<nc_core::Element>, glam::Vec2),
-    ClipboardFailed(String),
+    /// Work on another thread failed: shown as an error toast.
+    Failed(String),
     /// A wireframe, for the sketch and revision it was recognised from.
     Recognized {
         sketch: uuid::Uuid,
@@ -48,6 +49,18 @@ pub enum UserEvent {
         sketch: uuid::Uuid,
         doc: nc_core::Document,
     },
+    /// The style worker started reading a screenshot.
+    StyleReading,
+    /// A style read off a screenshot, and the name to save it under, or why it couldn't be read.
+    StyleRead(Result<(Box<nc_core::style::Extracted>, String), String>),
+    /// Image bytes found on the clipboard (no NeuralCanvas elements there): a screenshot to read.
+    PastedImage(Vec<u8>),
+    /// The style of a sketch, as stored.
+    SketchStyle {
+        sketch: uuid::Uuid,
+        result: Result<Option<nc_core::style::Style>, String>,
+    },
+    Presets(Result<Vec<nc_store::Preset>, String>),
     /// The screen reader asked for something.
     Access(accesskit_winit::Event),
     /// A retry, or a newly chosen folder, for a store that would not open. `result` is `None` when the

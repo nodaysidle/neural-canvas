@@ -35,3 +35,5 @@ serde = { workspace = true, features = ["derive"] }
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "file_chooser"] }
 async-io = "2"
 percent-encoding = "2"
+# Screenshots for the style mirror: PNG and JPEG only (the crates are already in the build for export).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

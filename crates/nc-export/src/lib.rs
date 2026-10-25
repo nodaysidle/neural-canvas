@@ -153,77 +153,100 @@ pub fn svg(elements: &[Arc<Element>], background: Option<[f32; 4]>, light: bool)
     Some(out)
 }
 
-/// The wireframe as SVG, drawn from the same marks as the canvas overlay (uncertain elements in their
-/// own colour). `None` when it is empty.
+fn colour(c: [f32; 4]) -> String {
+    format!("#{:02x}{:02x}{:02x}", srgb(c[0]), srgb(c[1]), srgb(c[2]))
+}
+
+/// The wireframe as SVG, painted exactly as the canvas overlay paints it (`draw::paint`): in the
+/// theme's wireframe colour, or filled in an imported style. `None` when it is empty.
 pub fn wireframe_svg(
     wire: &Wireframe,
     background: Option<[f32; 4]>,
-    light: bool,
+    look: &draw::Look,
 ) -> Option<String> {
+    let mut painted = Vec::new();
+    draw::paint(wire, look, &mut painted);
+    // The elements' bounds, and the styled backdrop around them.
+    let pad = match look {
+        draw::Look::Plain { .. } => 0.0,
+        draw::Look::Styled(style) => 2.0 * style.spacing as f64,
+    } + draw::LINE_WIDTH as f64;
     let b = wire
         .shapes
         .iter()
         .map(|s| s.bounds)
         .reduce(|a, b| a.union(b))?
-        .inflate(draw::LINE_WIDTH as f64, draw::LINE_WIDTH as f64);
+        .inflate(pad, pad);
     let mut out = header(b, background);
-    let mut marks = Vec::new();
+    for p in &painted {
+        let paint = match (p.mark, p.fill, p.stroke) {
+            // As the canvas draws a bar: one round-capped line as thick as the bar, at 55 % opacity.
+            (Mark::Bar { .. }, Some(f), _) => {
+                format!(r#"stroke="{}" stroke-opacity="{}""#, colour(f), f[3] * 0.55)
+            }
+            (_, fill, stroke) => {
+                let fill = fill.map_or("fill=\"none\"".to_string(), |f| {
+                    format!(r#"fill="{}" fill-opacity="{}""#, colour(f), f[3])
+                });
+                let stroke = stroke.map_or(String::new(), |c| {
+                    format!(
+                        r#" stroke="{}" stroke-opacity="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round""#,
+                        colour(c),
+                        c[3],
+                        p.width
+                    )
+                });
+                fill + &stroke
+            }
+        };
+        let _ = match p.mark {
+            Mark::Rect { rect: r, radius } => writeln!(
+                out,
+                r#"<rect x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" rx="{radius:.2}" {paint}/>"#,
+                r.x0,
+                r.y0,
+                r.width(),
+                r.height()
+            ),
+            Mark::Ellipse { rect: r } => writeln!(
+                out,
+                r#"<ellipse cx="{:.2}" cy="{:.2}" rx="{:.2}" ry="{:.2}" {paint}/>"#,
+                r.center().x,
+                r.center().y,
+                r.width() / 2.0,
+                r.height() / 2.0
+            ),
+            Mark::Line { a, b } => writeln!(
+                out,
+                r#"<line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}" {paint}/>"#,
+                a.x, a.y, b.x, b.y
+            ),
+            Mark::Bar { rect: r } => {
+                let (h, cy) = (r.height(), r.center().y);
+                writeln!(
+                    out,
+                    r#"<line x1="{:.2}" y1="{cy:.2}" x2="{:.2}" y2="{cy:.2}" stroke-width="{h:.2}" stroke-linecap="round" {paint}/>"#,
+                    r.x0 + h / 2.0,
+                    (r.x1 - h / 2.0).max(r.x0 + h / 2.0),
+                )
+            }
+        };
+    }
+    // Labels last: on top of every fill.
     for shape in &wire.shapes {
-        marks.clear();
-        draw::marks(shape, &mut marks);
-        let color = draw::color(light, shape.is_uncertain());
-        let stroke = format!(
-            r#"fill="none" stroke="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round""#,
-            paint(color),
-            draw::LINE_WIDTH
-        );
         if let Some((at, centred)) = draw::label_anchor(shape) {
+            let c = draw::label_color(shape, look);
             let _ = writeln!(
                 out,
-                r#"<text x="{:.2}" y="{:.2}" font-family="Manrope" font-size="{}" fill="{}" text-anchor="{}" dominant-baseline="central">{}</text>"#,
+                r#"<text x="{:.2}" y="{:.2}" font-family="Manrope" font-size="{}" fill="{}" fill-opacity="{}" text-anchor="{}" dominant-baseline="central">{}</text>"#,
                 at.x,
                 at.y,
                 draw::LABEL_SIZE,
-                paint(color).replace("stroke-opacity", "fill-opacity"),
+                colour(c),
+                c[3],
                 if centred { "middle" } else { "start" },
                 xml_escape(&shape.label)
             );
-        }
-        for m in &marks {
-            let _ = match *m {
-                Mark::Rect { rect: r, radius } => writeln!(
-                    out,
-                    r#"<rect x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" rx="{radius:.2}" {stroke}/>"#,
-                    r.x0,
-                    r.y0,
-                    r.width(),
-                    r.height()
-                ),
-                Mark::Ellipse { rect: r } => writeln!(
-                    out,
-                    r#"<ellipse cx="{:.2}" cy="{:.2}" rx="{:.2}" ry="{:.2}" {stroke}/>"#,
-                    r.center().x,
-                    r.center().y,
-                    r.width() / 2.0,
-                    r.height() / 2.0
-                ),
-                Mark::Line { a, b } => writeln!(
-                    out,
-                    r#"<line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}" {stroke}/>"#,
-                    a.x, a.y, b.x, b.y
-                ),
-                // As the canvas draws it: one round-capped line as thick as the bar, at 55 % opacity.
-                Mark::Bar { rect: r } => {
-                    let (h, cy) = (r.height(), r.center().y);
-                    writeln!(
-                        out,
-                        r#"<line x1="{:.2}" y1="{cy:.2}" x2="{:.2}" y2="{cy:.2}" stroke="{}" stroke-width="{h:.2}" stroke-linecap="round"/>"#,
-                        r.x0 + h / 2.0,
-                        (r.x1 - h / 2.0).max(r.x0 + h / 2.0),
-                        paint([color[0], color[1], color[2], color[3] * 0.55])
-                    )
-                }
-            };
         }
     }
     out.push_str("</svg>\n");
@@ -326,6 +349,8 @@ mod tests {
     use glam::Vec2;
     use nc_core::Shape;
 
+    const PLAIN: draw::Look = draw::Look::Plain { light: false };
+
     fn doc() -> Vec<Arc<Element>> {
         let mut s = Stroke::new(Vec2::new(10.0, 10.0), 4.0, [1.0, 0.0, 0.0, 1.0]);
         s.push(Vec2::new(90.0, 10.0));
@@ -361,10 +386,10 @@ mod tests {
 
     #[test]
     fn wireframe_svg_uses_native_elements_in_world_units() {
-        let svg = wireframe_svg(&wire(), None, false).unwrap();
+        let svg = wireframe_svg(&wire(), None, &PLAIN).unwrap();
         assert!(svg.contains("<line "), "{svg}");
         assert!(svg.contains("<rect ") && svg.contains(" rx="), "{svg}");
-        assert!(wireframe_svg(&Wireframe::default(), None, false).is_none());
+        assert!(wireframe_svg(&Wireframe::default(), None, &PLAIN).is_none());
     }
 
     /// Red (or wireframe blue) ink in the top band, the rectangle's edge in the bottom band, nothing
@@ -455,7 +480,7 @@ mod tests {
     #[test]
     fn wireframe_png_is_the_right_way_up() {
         let w = wire();
-        let svg = wireframe_svg(&w, Some([0.0, 0.0, 0.0, 1.0]), false).unwrap();
+        let svg = wireframe_svg(&w, Some([0.0, 0.0, 0.0, 1.0]), &PLAIN).unwrap();
         let png = tiny_skia::Pixmap::decode_png(&png(&svg, 2.0).unwrap()).unwrap();
         // Bounds grow by the wireframe line width (2) instead of 1: world y → row (y − 6) × 2.
         let y0 = w
@@ -477,6 +502,49 @@ mod tests {
         );
     }
 
+    /// A styled wireframe exports as the canvas paints it: filled, in the style's colours.
+    #[test]
+    fn styled_wireframe_exports_filled() {
+        let style = nc_core::style::Style {
+            background: 0xffffff,
+            surface: 0xf4f5f7,
+            accent: 0x1f5fd1,
+            text: 0x16181e,
+            radius: 6.0,
+            spacing: 8.0,
+            line_height: None,
+        };
+        let w = Wireframe {
+            shapes: vec![nc_core::recognize::Recognized {
+                shape_type: nc_core::ShapeType::Button,
+                bounds: Rect::new(0.0, 0.0, 120.0, 40.0),
+                confidence: 0.9,
+                corner_radius: None,
+                ends: None,
+                sources: vec![],
+                label: "Sign in".into(),
+                pinned: None,
+            }],
+            ..Wireframe::default()
+        };
+        let svg = wireframe_svg(&w, None, &draw::Look::Styled(style)).unwrap();
+        assert!(svg.contains(r##"fill="#1f5fd1""##), "{svg}");
+        let png = tiny_skia::Pixmap::decode_png(&png(&svg, 1.0).unwrap()).unwrap();
+        // Bounds: the backdrop (16) plus the line width (2) around the button.
+        let p = png.pixel(18 + 10, 18 + 10).unwrap();
+        assert_eq!(
+            (p.red(), p.green(), p.blue()),
+            (0x1f, 0x5f, 0xd1),
+            "button fill"
+        );
+        let p = png.pixel(4, 4).unwrap();
+        assert_eq!(
+            (p.red(), p.green(), p.blue()),
+            (0xff, 0xff, 0xff),
+            "backdrop"
+        );
+    }
+
     /// Labels are written as text and rendered in the bundled face (no system fonts).
     #[test]
     fn wireframe_labels_are_written_and_rendered() {
@@ -489,7 +557,7 @@ mod tests {
                 .unwrap();
             boxed.shape_type = nc_core::ShapeType::Card;
             boxed.label = label.into();
-            let svg = wireframe_svg(&w, Some([0.0, 0.0, 0.0, 1.0]), false).unwrap();
+            let svg = wireframe_svg(&w, Some([0.0, 0.0, 0.0, 1.0]), &PLAIN).unwrap();
             let png = tiny_skia::Pixmap::decode_png(&png(&svg, 2.0).unwrap()).unwrap();
             let lit = png.pixels().iter().filter(|p| p.green() > 100).count();
             (svg, lit)

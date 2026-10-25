@@ -18,7 +18,7 @@ const THUMB_EVERY: Duration = Duration::from_secs(1);
 
 impl App {
     /// A store call off this thread; nothing happens while there is no store (its dialog is up).
-    fn request<T: Send + 'static>(
+    pub(super) fn request<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Db) -> nc_store::Result<T> + Send + 'static,
         done: impl FnOnce(nc_store::Result<T>) + Send + 'static,
@@ -30,6 +30,7 @@ impl App {
 
     /// Reloads the project list for the sidebar.
     pub(super) fn refresh_projects(&self) {
+        self.refresh_presets();
         let proxy = self.proxy.clone();
         self.request(
             |db| db.projects(),
@@ -92,8 +93,11 @@ impl App {
         self.lifted.clear();
         self.wire_selected = None;
         self.wireframe = None;
-        self.wire_segments.clear();
+        self.wire_painted.clear();
         self.wire_serial += 1;
+        self.style = None;
+        self.style_pending = None;
+        self.load_style();
         self.requested = None;
         self.reviewing = None;
         self.animation = None;

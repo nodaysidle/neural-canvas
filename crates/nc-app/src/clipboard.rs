@@ -1,5 +1,6 @@
 //! Copy and paste on a worker thread: building SVG and PNG for other apps is export work, and reading
-//! the clipboard blocks on the app that owns it. Neither may stall the canvas.
+//! the clipboard blocks on the app that owns it. Neither may stall the canvas. Pasting another app's
+//! image hands it to the style mirror.
 
 use crate::UserEvent;
 use glam::Vec2;
@@ -36,17 +37,18 @@ impl Clipboard {
                         Request::Copy(elements, background, light) => {
                             match copy_out(&elements, background, light) {
                                 Ok(()) => continue,
-                                Err(e) => UserEvent::ClipboardFailed(nc_shell::copy::copy_failed(
-                                    &e.to_string(),
-                                )),
+                                Err(e) => {
+                                    UserEvent::Failed(nc_shell::copy::copy_failed(&e.to_string()))
+                                }
                             }
                         }
                         Request::Paste(centre) => match paste_in() {
-                            Ok(Some(elements)) => UserEvent::Pasted(elements, centre),
-                            Ok(None) => continue,
-                            Err(e) => UserEvent::ClipboardFailed(nc_shell::copy::paste_failed(
-                                &e.to_string(),
-                            )),
+                            Ok(Found::Elements(elements)) => UserEvent::Pasted(elements, centre),
+                            Ok(Found::Image(bytes)) => UserEvent::PastedImage(bytes),
+                            Ok(Found::Nothing) => continue,
+                            Err(e) => {
+                                UserEvent::Failed(nc_shell::copy::paste_failed(&e.to_string()))
+                            }
                         },
                     };
                     let _ = proxy.send_event(event);
@@ -95,12 +97,33 @@ fn copy_out(
     Ok(())
 }
 
-/// `Ok(None)` when the clipboard holds nothing of ours (an empty clipboard, text, another app's image).
-fn paste_in() -> Result<Option<Vec<Element>>, Box<dyn std::error::Error>> {
+enum Found {
+    Elements(Vec<Element>),
+    /// Another app's image: a screenshot to take a style from.
+    Image(Vec<u8>),
+    /// An empty clipboard, text, or something unreadable.
+    Nothing,
+}
+
+/// Our own elements first; else a PNG or JPEG image.
+fn paste_in() -> Result<Found, Box<dyn std::error::Error>> {
+    if let Some(bytes) = read(CLIPBOARD_MIME)? {
+        return Ok(decode(&bytes).map_or(Found::Nothing, Found::Elements));
+    }
+    for mime in ["image/png", "image/jpeg"] {
+        if let Some(bytes) = read(mime)? {
+            return Ok(Found::Image(bytes));
+        }
+    }
+    Ok(Found::Nothing)
+}
+
+/// The clipboard's contents as `mime`, `None` when it has none.
+fn read(mime: &str) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let (mut pipe, _) = match paste::get_contents(
         paste::ClipboardType::Regular,
         paste::Seat::Unspecified,
-        paste::MimeType::Specific(CLIPBOARD_MIME),
+        paste::MimeType::Specific(mime),
     ) {
         Ok(found) => found,
         Err(paste::Error::NoSeats | paste::Error::ClipboardEmpty | paste::Error::NoMimeType) => {
@@ -110,5 +133,5 @@ fn paste_in() -> Result<Option<Vec<Element>>, Box<dyn std::error::Error>> {
     };
     let mut bytes = Vec::new();
     pipe.read_to_end(&mut bytes)?;
-    Ok(decode(&bytes))
+    Ok(Some(bytes))
 }

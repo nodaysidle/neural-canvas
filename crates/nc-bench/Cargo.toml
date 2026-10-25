@@ -26,3 +26,5 @@ rand = { version = "0.10", default-features = false }
 rand_chacha = { version = "0.10", default-features = false }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 libc = "0.2"
+nc-export.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

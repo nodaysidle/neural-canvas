@@ -14,6 +14,7 @@ pub mod scene;
 pub mod schedule;
 pub mod select;
 pub mod shape;
+pub mod style;
 pub mod theme;
 pub mod tools;
 

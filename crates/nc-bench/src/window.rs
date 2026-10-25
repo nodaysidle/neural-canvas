@@ -51,6 +51,9 @@ pub struct Config {
     /// Keep a worker thread recognising S2k back to back for the whole run, as the app's
     /// recognition thread would under constant edits.
     pub recognize: bool,
+    /// Keep a worker thread decoding this screenshot and reading its style back to back, as the
+    /// app's style worker would on repeated imports.
+    pub style: Option<std::path::PathBuf>,
     /// Draw the app's chrome (nc-shell) on top every frame, sidebar and inspector open, rebuilt each
     /// frame as the app does.
     pub shell: bool,
@@ -175,6 +178,29 @@ pub fn run(cfg: Config) {
             ms
         })
     });
+    let styler = cfg.style.clone().map(|path| {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            // SAFETY: a plain syscall on the calling thread with a valid parameter.
+            unsafe {
+                let param = libc::sched_param { sched_priority: 0 };
+                libc::sched_setscheduler(0, libc::SCHED_IDLE, &param);
+            }
+            let bytes = std::fs::read(path).expect("screenshot");
+            let mut ms = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let t = Instant::now();
+                let image = image::load_from_memory(&bytes).expect("decode").to_rgba8();
+                std::hint::black_box(nc_core::style::extract(
+                    image.as_raw(),
+                    image.width(),
+                    image.height(),
+                ));
+                ms.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            ms
+        })
+    });
     let mut bench = Bench {
         doc: scene::s2k(1),
         live: None,
@@ -229,6 +255,13 @@ pub fn run(cfg: Config) {
         let ms = worker.join().expect("recognition thread");
         if let Some(s) = Summary::of(&ms) {
             println!("recognition of S2k on a worker, back to back: {s}");
+        }
+    }
+    if let Some(worker) = styler {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let ms = worker.join().expect("style thread");
+        if let Some(s) = Summary::of(&ms) {
+            println!("screenshot decode + style extraction on a worker, back to back: {s}");
         }
     }
 }
@@ -740,6 +773,7 @@ impl Bench {
         if let Some(c) = &mut self.chrome {
             let status = nc_shell::Status {
                 store_error: None,
+                style: Default::default(),
                 dark: true,
                 tool: nc_core::Tool::Pen,
                 ink: 0,

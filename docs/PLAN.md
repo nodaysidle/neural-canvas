@@ -131,6 +131,28 @@ offscreen wgpu renderer, JPEG via `image`.**
   theme, grid, smoothing, pressure curve, sidebar and inspector open state, store folder.
 - **Raster export cap:** 8,192 px on the long side.
 
+### Phase 6 decisions (2026-10-25, [`reports/phase-6.md`](reports/phase-6.md))
+
+- **Palette:** `kmeans_colors` (no default features; `palette_color`) with k = 16 in CIELAB on up to
+  120k sampled pixels; each cluster snaps to its most frequent exact pixel, so flat UI colours come
+  back as painted. k = 10 lost low-share text colours on real screenshots.
+- **Roles:** background is the colour most common along the image's edges (not the largest share:
+  cards can outweigh the page); text is the colour of short thin strokes that contrasts most with it;
+  accent the largest-share colour of Lab chroma ≥ 20; surface the largest neutral within 20 L of the
+  background. A role the screenshot doesn't show is derived and the inspector says so.
+- **Geometry:** boxes are single-colour regions that fill their bounding box, sit inside the window and
+  aren't strips; each box size votes once (a canvas grid is one vote). Radius comes from the uncovered
+  corner area, `r = √(A / (1 − π/4))`; sharp boxes win only if fewer than a quarter are rounded.
+  Spacing is 8 or 4 from gaps and insets between boxes; 8 is assumed with fewer than four.
+- **Applying:** the style paints the wireframe as a filled mockup (`draw::paint`, shared by canvas and
+  SVG export): backdrop, surfaces, accent buttons, the style's radius; uncertain elements keep their
+  amber outline. Fills are drawn by the canvas shader as rounded boxes and ellipses (`FILL`, `ELLIPSE`
+  instance flags) and are half strength while the raw sketch shows too. Spacing only pads the
+  backdrop and line height is reported, not applied.
+- **Storage:** schema v4: `style_presets` table and `sketches.style`, postcard-encoded `Style`.
+- **Threads:** decoding (`image`, PNG and JPEG only, 16384 px and 1 GiB limits) and extraction run on
+  a `style` worker at `SCHED_IDLE`; the portal picker runs there too.
+
 ## 2. Architecture
 
 ```
@@ -151,7 +173,7 @@ crates/
   spike-iced/  Phase 0 iced 0.14 host spike, kept as the rerun harness for the shell decision.
 packaging/     PKGBUILD, PKGBUILD-bin, .desktop, metainfo.xml, icons, AppImage recipe.
 ```
-Present after Phase 5: `nc-core` (with `recognize`), `nc-render` (canvas + UI pass), `nc-store`, `nc-export` (SVG, PDF, PNG, JPEG; raw and wireframe), `nc-shell`, `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`.
+Present after Phase 6: `nc-core` (with `recognize` and `style`), `nc-render` (canvas + UI pass), `nc-store` (with style presets), `nc-export` (SVG, PDF, PNG, JPEG; raw and wireframe, plain or styled), `nc-shell`, `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`.
 
 **Coordinates (one convention, everywhere):** world space is y-down, origin top-left, 1 unit = 1 logical px
 at 100%. `screen = world * scale + offset`. Matches Wayland, SVG, PDF and PNG; the only flip is world→clip in
