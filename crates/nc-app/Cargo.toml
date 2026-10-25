@@ -19,10 +19,19 @@ pollster.workspace = true
 nc-store.workspace = true
 signal-hook = "0.4"
 dirs = "7"
-mundy = { version = "0.2", default-features = false, features = ["callback", "reduced-motion", "async-io"] }
+mundy = { version = "0.2", default-features = false, features = ["callback", "reduced-motion", "color-scheme", "async-io"] }
 nc-wayland.workspace = true
 nc-export.workspace = true
+nc-shell.workspace = true
 crossbeam-channel = "0.5"
 uuid.workspace = true
 wl-clipboard-rs = "0.9"
 libc = "0.2"
+accesskit_winit = "0.34"
+accesskit = "0.25"
+serde_json = "1"
+serde = { workspace = true, features = ["derive"] }
+# The XDG file chooser portal, for picking another sketch-store folder.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "file_chooser"] }
+async-io = "2"
+percent-encoding = "2"

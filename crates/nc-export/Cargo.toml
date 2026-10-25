@@ -7,9 +7,11 @@ license.workspace = true
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 nc-core.workspace = true
-# No fonts or raster images: the sketch is vector ink only.
-resvg = { version = "0.45", default-features = false }
-svg2pdf = { version = "0.13", default-features = false }
+# The bundled interface faces, for wireframe labels.
+nc-render.workspace = true
+# No system fonts or raster images: labels use the bundled faces, the sketch is vector ink.
+resvg = { version = "0.45", default-features = false, features = ["text"] }
+svg2pdf = { version = "0.13", default-features = false, features = ["text"] }
 
 [dev-dependencies]
 glam.workspace = true

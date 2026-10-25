@@ -51,6 +51,9 @@ pub struct Config {
     /// Keep a worker thread recognising S2k back to back for the whole run, as the app's
     /// recognition thread would under constant edits.
     pub recognize: bool,
+    /// Draw the app's chrome (nc-shell) on top every frame, sidebar and inspector open, rebuilt each
+    /// frame as the app does.
+    pub shell: bool,
 }
 
 const WARMUP: Duration = Duration::from_secs(1);
@@ -63,6 +66,33 @@ struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
+    ui: nc_render::ui::UiRenderer,
+}
+
+/// The chrome the shell option draws: the app's shell over a sample project list.
+struct Chrome {
+    shell: nc_shell::Shell,
+    projects: Vec<nc_store::ProjectInfo>,
+}
+
+impl Chrome {
+    fn new() -> Self {
+        let mut shell = nc_shell::Shell::new();
+        shell.sidebar = true;
+        shell.inspector = true;
+        let sketches = (0..6)
+            .map(|i| nc_store::SketchInfo {
+                id: uuid::Uuid::from_u128(i + 1),
+                name: format!("Sketch {}", i + 1),
+            })
+            .collect();
+        let projects = vec![nc_store::ProjectInfo {
+            id: uuid::Uuid::from_u128(100),
+            name: "S2k".into(),
+            sketches,
+        }];
+        Self { shell, projects }
+    }
 }
 
 struct FrameRec {
@@ -96,6 +126,7 @@ struct Bench {
     tablet: (usize, Vec<nc_wayland::ToolFrame>),
     /// Move scenario: the session holding the document, and the selection's state at the press.
     moving: Option<Moving>,
+    chrome: Option<Chrome>,
     /// Move scenario: ms per frame spent building and applying the move edit (nc-core only).
     edit_ms: Vec<f64>,
     /// ms per recorded frame in `Renderer::render` (sync + upload + encode) and in `queue.submit`.
@@ -164,10 +195,14 @@ pub fn run(cfg: Config) {
         motion_delivery_ms: Vec::new(),
         tablet: (0, Vec::new()),
         moving: None,
+        chrome: None,
         edit_ms: Vec::new(),
         render_ms: Vec::new(),
         pointer_track: Vec::new(),
     };
+    if bench.cfg.shell {
+        bench.chrome = Some(Chrome::new());
+    }
     if bench.cfg.scenario == Scenario::Move {
         let doc = std::mem::take(&mut bench.doc);
         // Every fourth stroke, so the moved ones are spread through z-order and across the scene.
@@ -244,6 +279,7 @@ impl Gpu {
         config.desired_maximum_frame_latency = 1; // same as the app
         surface.configure(&device, &config);
         let renderer = Renderer::new(&device, config.format);
+        let ui = nc_render::ui::UiRenderer::new(&device, &queue, config.format);
         Self {
             window,
             surface,
@@ -251,6 +287,7 @@ impl Gpu {
             queue,
             config,
             renderer,
+            ui,
         }
     }
 }
@@ -700,6 +737,38 @@ impl Bench {
             size.to_array(),
             scale,
         );
+        if let Some(c) = &mut self.chrome {
+            let status = nc_shell::Status {
+                store_error: None,
+                dark: true,
+                tool: nc_core::Tool::Pen,
+                ink: 0,
+                width: 1,
+                zoom: self.viewport.scale,
+                wire_level: 0.0,
+                split: false,
+                projects: &c.projects,
+                sketch: uuid::Uuid::from_u128(1),
+                save: nc_shell::SaveStatus::Saved,
+                quality: None,
+                inspect: nc_shell::Inspect::Nothing,
+                empty: false,
+                drawing: self.live.is_some(),
+                summary: nc_shell::copy::canvas_summary(2000, 0, 0),
+                settings: nc_shell::Settings::default(),
+                loading: false,
+            };
+            c.shell.build(&status, size, &mut g.ui);
+            g.ui.render(
+                &g.device,
+                &g.queue,
+                &mut encoder,
+                &view,
+                c.shell.scene(),
+                size.to_array(),
+                scale,
+            );
+        }
         let t_submit = Instant::now();
         g.queue.submit([encoder.finish()]);
         if feedback.is_some() {

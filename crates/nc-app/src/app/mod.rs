@@ -1,5 +1,12 @@
-//! The canvas controller: input (mouse, touchpad, tablet) → tools → commands on the open sketch, the
-//! view, frame scheduling and autosave. This thread never touches disk and never blocks on a worker.
+//! The canvas controller: input (mouse, touchpad, tablet) → chrome or tools → commands on the open
+//! sketch, the view, frame scheduling and autosave. This thread never touches disk and never blocks on
+//! a worker. The chrome's side lives in `shell`, projects and sketches in `library`, the
+//! accessibility tree in `access`, preferences in `settings`.
+
+mod access;
+mod library;
+pub mod settings;
+mod shell;
 
 use crate::UserEvent;
 use crate::chrome;
@@ -17,21 +24,22 @@ use nc_core::{
     Viewport, hit, shape,
 };
 use nc_render::{Blend, Lifted, LiveStroke, Scene, WireLayer};
-use nc_store::{Store, StoreEvent};
+use nc_shell::{INKS, Settings, WIDTHS};
+use nc_store::{ProjectInfo, Store, StoreEvent};
 use nc_wayland::{Presented, SideChannel, ToolFrame, ToolKind, mono_ns};
+use std::collections::HashMap;
 use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Cursor, CursorIcon, CustomCursor, WindowId};
 
-const INK: [f32; 4] = [0.85, 0.87, 0.93, 1.0];
-const PEN_WIDTH: f32 = 2.5;
 /// Logical px kept clear around content by Zoom to Fit.
 const FIT_PADDING: f32 = 48.0;
 /// Eraser reach in logical px, the same at every zoom.
@@ -43,6 +51,9 @@ const DUPLICATE_OFFSET: f32 = 16.0;
 /// Room around an uncertain item when reviewing it, logical px, and the closest zoom it gets.
 const REVIEW_PADDING: f32 = 120.0;
 const REVIEW_MAX_ZOOM: f32 = 2.0;
+/// Touchpad pan inertia: velocity halves about every 0.17 s, and stops below this speed (px/s).
+const INERTIA_DECAY: f32 = 0.25;
+const INERTIA_STOP: f32 = 20.0;
 /// Refresh period until presentation feedback reports the real one.
 const DEFAULT_REFRESH: f64 = 1.0 / 120.0;
 /// Points reserved per live stroke, so the hot input path does not reallocate (a few seconds of 1 kHz
@@ -73,7 +84,14 @@ struct InFlight {
 pub struct App {
     gpu: Option<Gpu>,
     wl: Option<SideChannel>,
-    store: Store,
+    /// `None` while the store can't be opened: a blocking dialog is up and nothing can be drawn.
+    store: Option<Store>,
+    /// Why the store can't be opened, for that dialog.
+    store_error: Option<String>,
+    /// The folder the store lives in when not the default one (chosen in that dialog).
+    store_dir: Option<PathBuf>,
+    /// A retry or folder choice is running on a worker.
+    store_busy: bool,
     session: Session,
     /// The sketch could not be read: show what loaded, accept no edits, never save over it.
     read_only: bool,
@@ -97,19 +115,21 @@ pub struct App {
     /// edited in the document once, on release.
     lifted: HashSet<ElementId>,
     hover_handle: Option<Handle>,
-    /// Chrome and predicted ink for the frame being drawn; reused so frames do not allocate.
+    /// Chrome for the frame being drawn, and ink on top (predicted ink, a shape being dragged);
+    /// reused so frames do not allocate.
     overlay: Vec<Segment>,
+    ink_overlay: Vec<Segment>,
     clipboard: Clipboard,
-    /// A clipboard or export result, shown until the next clipboard or export action.
-    notice: Option<String>,
     recognizer: Recognizer,
     exporter: Exporter,
     /// 0 = raw sketch only, 0.5 = both, 1 = wireframe only.
     wire_level: f32,
     /// Raw sketch and wireframe side by side.
     split: bool,
-    /// The newest wireframe for the current revision, and its capsules.
+    /// The newest wireframe for the current revision, and its capsules (drawn for the light canvas
+    /// when `wire_light`).
     wireframe: Option<Arc<Wireframe>>,
+    wire_light: bool,
     wire_segments: Vec<Segment>,
     wire_serial: u64,
     /// Revision last sent for recognition.
@@ -132,21 +152,70 @@ pub struct App {
     draw_at: Option<u64>,
     next_frame: u64,
     in_flight: VecDeque<InFlight>,
+
+    proxy: EventLoopProxy<UserEvent>,
+    shell: nc_shell::Shell,
+    settings: Settings,
+    settings_writer: settings::SettingsWriter,
+    /// The desktop's colour scheme (portal), used when Preferences say "Match system".
+    system_dark: bool,
+    /// Palette choices for new ink.
+    ink: usize,
+    width: usize,
+    projects: Vec<ProjectInfo>,
+    /// A sketch is being opened: input waits for it.
+    loading: bool,
+    /// Newest revision of the open sketch the store has written.
+    saved_revision: u64,
+    /// The wireframe element the inspector edits, by its sources.
+    wire_selected: Option<Vec<ElementId>>,
+    /// Side by side: the pointer is over the wireframe pane.
+    pointer_in_right_pane: bool,
+    /// Pointer in window px (the chrome's space; `cursor` is the canvas pane's).
+    window_cursor: Vec2,
+    /// The pointer is over chrome: it gets the default cursor.
+    over_chrome: bool,
+    thumb_rendered: HashMap<Uuid, u64>,
+    thumb_pending: HashSet<Uuid>,
+    thumb_at: Option<Instant>,
+    export_dir: Option<PathBuf>,
+    /// The "Exporting…" toast, while an export runs.
+    exporting: Option<u64>,
+    access: Option<accesskit_winit::Adapter>,
+    /// Touchpad pan velocity, px/s: estimated while panning, coasting after the fingers lift.
+    pan_velocity: Vec2,
+    last_pan: Option<f64>,
+    inertia: Option<f64>,
 }
 
 impl App {
     pub fn new(
-        store: Store,
-        session: Session,
-        read_only: bool,
+        opened: Result<crate::Opened, String>,
         proxy: EventLoopProxy<UserEvent>,
+        settings: Settings,
+        store_dir: Option<PathBuf>,
     ) -> Self {
-        let c = nc_render::CLEAR;
-        let background = [c.r as f32, c.g as f32, c.b as f32, 1.0];
+        // Without a store the app opens on an empty, read-only canvas under the store dialog.
+        let (store, session, read_only, store_error) = match opened {
+            Ok((store, session, read_only)) => (Some(store), session, read_only, None),
+            Err(e) => (
+                None,
+                Session::new(Uuid::nil(), nc_core::Document::default()),
+                true,
+                Some(e),
+            ),
+        };
+        let saved_revision = session.doc().revision();
+        let mut shell = nc_shell::Shell::new();
+        shell.sidebar = settings.sidebar;
+        shell.inspector = settings.inspector;
         Self {
             gpu: None,
             wl: None,
             store,
+            store_error,
+            store_dir: store_dir.clone(),
+            store_busy: false,
             session,
             read_only,
             save_error: None,
@@ -165,13 +234,14 @@ impl App {
             lifted: HashSet::new(),
             hover_handle: None,
             overlay: Vec::new(),
-            clipboard: Clipboard::new(proxy.clone(), background),
-            notice: None,
+            ink_overlay: Vec::new(),
+            clipboard: Clipboard::new(proxy.clone()),
             recognizer: Recognizer::new(proxy.clone()),
-            exporter: Exporter::new(proxy, background),
+            exporter: Exporter::new(proxy.clone()),
             wire_level: 0.0,
             split: false,
             wireframe: None,
+            wire_light: false,
             wire_segments: Vec::new(),
             wire_serial: 0,
             requested: None,
@@ -188,7 +258,36 @@ impl App {
             draw_at: None,
             next_frame: 0,
             in_flight: VecDeque::new(),
+            proxy,
+            shell,
+            settings,
+            settings_writer: settings::SettingsWriter::new(settings, store_dir),
+            system_dark: true,
+            ink: 0,
+            width: 1,
+            projects: Vec::new(),
+            loading: false,
+            saved_revision,
+            wire_selected: None,
+            pointer_in_right_pane: false,
+            window_cursor: Vec2::ZERO,
+            over_chrome: false,
+            thumb_rendered: HashMap::new(),
+            thumb_pending: HashSet::new(),
+            thumb_at: None,
+            export_dir: None,
+            exporting: None,
+            access: None,
+            pan_velocity: Vec2::ZERO,
+            last_pan: None,
+            inertia: None,
         }
+    }
+
+    /// The canvas background as RGBA, for exports and the clipboard (they look like the canvas).
+    fn export_look(&self) -> ([f32; 4], bool) {
+        let theme = self.palette().canvas;
+        (theme.background_rgba(), theme.light)
     }
 
     fn now(&self) -> f64 {
@@ -210,6 +309,7 @@ impl App {
             Handle::East | Handle::West => CursorIcon::EwResize,
         };
         let cursor: Cursor = match (&self.drag, self.tools.active()) {
+            (None, _) if self.over_chrome => CursorIcon::Default.into(),
             (Some(Drag::Pan), _) => CursorIcon::Grabbing.into(),
             (Some(Drag::Select(Gesture::Resize { handle, .. })), _) => resize(*handle).into(),
             (Some(Drag::Select(Gesture::Move { .. })), _) => CursorIcon::Move.into(),
@@ -222,36 +322,6 @@ impl App {
             (_, Tool::Pen | Tool::Shape(_)) => CursorIcon::Crosshair.into(),
         };
         g.window.set_cursor(cursor);
-    }
-
-    // shortcut: problems show in the window title until the Phase 5 shell has banners and toasts.
-    fn update_title(&self) {
-        let Some(g) = &self.gpu else { return };
-        let mut title = match (&self.save_error, self.read_only) {
-            (Some(e), _) => format!("NeuralCanvas (not saved: {e})"),
-            (None, true) => "NeuralCanvas (read-only: this sketch could not be read)".into(),
-            (None, false) => "NeuralCanvas".into(),
-        };
-        if self.wire_visible() {
-            if self.split {
-                title.push_str(" · Side by side");
-            } else {
-                title.push_str(&format!(" · Wireframe {:.0} %", self.wire_level * 100.0));
-            }
-            if let Some(w) = &self.wireframe {
-                title.push_str(&format!(" · {}", w.report.status().display_name()));
-                if w.report.uncertain_count > 0 {
-                    title.push_str(&format!(
-                        " · Review {} uncertain (U)",
-                        w.report.uncertain_count
-                    ));
-                }
-            }
-        }
-        if let Some(n) = &self.notice {
-            title.push_str(&format!(" · {n}"));
-        }
-        g.window.set_title(&title);
     }
 
     fn wire_visible(&self) -> bool {
@@ -269,7 +339,9 @@ impl App {
     fn set_wire(&mut self, level: f32, split: bool) {
         self.wire_level = level.clamp(0.0, 1.0);
         self.split = split;
-        self.update_title();
+        if !self.wire_visible() {
+            self.wire_selected = None;
+        }
         self.redraw();
     }
 
@@ -298,12 +370,19 @@ impl App {
         if sketch != self.session.sketch_id || revision != self.session.doc().revision() {
             return;
         }
-        self.wire_segments.clear();
-        draw::segments(&wire, &mut self.wire_segments);
-        self.wire_serial += 1;
         self.wireframe = Some(wire);
-        self.update_title();
+        self.redraw_wireframe();
         self.redraw();
+    }
+
+    /// Rebuilds the wireframe's capsules in the current theme's colours.
+    fn redraw_wireframe(&mut self) {
+        self.wire_light = !self.dark();
+        self.wire_segments.clear();
+        if let Some(wire) = &self.wireframe {
+            draw::segments(wire, self.wire_light, &mut self.wire_segments);
+        }
+        self.wire_serial += 1;
     }
 
     /// Zooms to the next element the quality gate flagged, in reading order.
@@ -321,7 +400,7 @@ impl App {
             .collect();
         if uncertain.is_empty() {
             self.reviewing = None;
-            self.set_notice(Some("Nothing uncertain to review".into()));
+            self.toast_info(nc_shell::copy::NOTHING_TO_REVIEW.into(), None);
             return;
         }
         uncertain.sort_by(|a, b| a.y0.total_cmp(&b.y0).then(a.x0.total_cmp(&b.x0)));
@@ -332,11 +411,11 @@ impl App {
         if view.scale > REVIEW_MAX_ZOOM {
             view.zoom_at(self.pane_size() * 0.5, REVIEW_MAX_ZOOM / view.scale);
         }
-        self.set_notice(Some(format!(
-            "Uncertain item {} of {}",
-            (self.reviewed - 1) % uncertain.len() + 1,
-            uncertain.len()
-        )));
+        let n = uncertain.len();
+        self.toast_info(
+            nc_shell::copy::reviewing((self.reviewed - 1) % n + 1, n),
+            None,
+        );
         self.animate_to(view);
     }
 
@@ -360,6 +439,7 @@ impl App {
         self.tools.choose(tool);
         if !matches!(tool, Tool::Select | Tool::Hand) {
             self.selection.clear();
+            self.wire_selected = None;
         }
         self.hover_handle = None;
         self.set_cursor();
@@ -378,8 +458,9 @@ impl App {
         if self.read_only {
             return;
         }
+        let Some(store) = &self.store else { return };
         let doc = self.session.doc();
-        self.store.save(
+        store.save(
             self.session.sketch_id,
             doc.revision(),
             doc.elements().to_vec(),
@@ -394,9 +475,10 @@ impl App {
         self.redraw();
     }
 
-    /// Any direct manipulation of the view stops a running view animation.
+    /// Any direct manipulation of the view stops a running view animation or glide.
     fn take_view(&mut self) {
         self.animation = None;
+        self.inertia = None;
     }
 
     // ---- input, shared by mouse and tablet. Positions are logical px. ----
@@ -404,10 +486,21 @@ impl App {
     fn press(&mut self, pos: Vec2, pressure: Option<f32>) {
         self.cursor = pos;
         self.take_view();
+        if self.loading {
+            return;
+        }
         match self.tools.active() {
             Tool::Hand => self.drag = Some(Drag::Pan),
+            Tool::Select if self.picks_wire() => {
+                // The wireframe is showing: clicks pick its elements for the inspector.
+                let world = self.world(pos);
+                self.pick_wire(world);
+                self.selection.clear();
+                self.redraw();
+            }
             _ if self.read_only => {}
             Tool::Select => {
+                self.wire_selected = None;
                 let handle = self
                     .selection_screen_bounds()
                     .and_then(|b| select::handle_at(b, pos));
@@ -438,12 +531,13 @@ impl App {
                 self.smoother.reset();
                 self.predictor.reset();
                 let now = self.now();
-                let p = self.smoother.smooth(pos, now);
+                let p = self.smooth(pos, now);
                 self.predictor.push(now, p);
                 let world = self.viewport.screen_to_world(p);
+                let (width, ink) = (WIDTHS[self.width], INKS[self.ink]);
                 let mut stroke = match pressure {
-                    Some(pr) => Stroke::with_pressure(world, pr, PEN_WIDTH, INK),
-                    None => Stroke::new(world, PEN_WIDTH, INK),
+                    Some(pr) => Stroke::with_pressure(world, pr, width, ink),
+                    None => Stroke::new(world, width, ink),
                 };
                 stroke.points.reserve(LIVE_RESERVE);
                 if pressure.is_some() {
@@ -474,7 +568,7 @@ impl App {
             }
             Some(Drag::Draw) => {
                 let now = self.now();
-                let p = self.smoother.smooth(pos, now);
+                let p = self.smooth(pos, now);
                 self.predictor.push(now, p);
                 let world = self.viewport.screen_to_world(p);
                 if let Some(stroke) = &mut self.live
@@ -545,6 +639,15 @@ impl App {
         self.set_cursor();
     }
 
+    /// A pen sample through the 1€ filter, unless smoothing is off in Preferences.
+    fn smooth(&mut self, pos: Vec2, now: f64) -> Vec2 {
+        if self.settings.smoothing {
+            self.smoother.smooth(pos, now)
+        } else {
+            pos
+        }
+    }
+
     /// The shape a drag from `start` to the pointer makes, with Shift (constrain) and Alt (from centre).
     fn shape_to(&self, kind: ShapeKind, start: Vec2) -> nc_core::Shape {
         shape::from_drag(
@@ -553,8 +656,8 @@ impl App {
             self.world(self.cursor),
             self.modifiers.shift_key(),
             self.modifiers.alt_key(),
-            PEN_WIDTH,
-            INK,
+            WIDTHS[self.width],
+            INKS[self.ink],
         )
     }
 
@@ -589,6 +692,11 @@ impl App {
         wl.drain_tool_frames(|f| frames.push(f));
         for f in frames.drain(..) {
             let pos = self.to_pane(Vec2::new(f.position.0 as f32, f.position.1 as f32));
+            let curve = self.settings.pressure;
+            let f = ToolFrame {
+                pressure: f.pressure.map(|p| curve.apply(p)),
+                ..f
+            };
             if f.entered {
                 self.tablet_near = true;
                 self.tools.set_stylus_eraser(f.kind == ToolKind::Eraser);
@@ -649,6 +757,7 @@ impl App {
             Action::Deselect => {
                 self.selection.clear();
                 self.reviewing = None;
+                self.wire_selected = None;
             }
             Action::Delete => {
                 let edit = select::delete(&self.selection);
@@ -662,13 +771,11 @@ impl App {
                 self.selection = copies;
             }
             Action::Copy => {
-                self.clipboard.copy(select::selected(doc, &self.selection));
-                self.set_notice(None);
+                let (background, light) = self.export_look();
+                self.clipboard
+                    .copy(select::selected(doc, &self.selection), background, light);
             }
-            Action::Paste => {
-                self.clipboard.paste(self.world(self.cursor));
-                self.set_notice(None);
-            }
+            Action::Paste => self.clipboard.paste(self.world(self.cursor)),
             Action::Nudge { dx, dy } => {
                 let edit =
                     select::translated(doc, &self.selection, Vec2::new(dx as f32, dy as f32));
@@ -704,18 +811,58 @@ impl App {
             Action::SideBySide => self.set_wire(self.wire_level, !self.split),
             Action::ReviewUncertain => self.review_uncertain(),
             Action::Export { wireframe } => {
-                self.exporter.export(doc.elements().to_vec(), wireframe);
-                self.set_notice(Some("Exporting…".into()));
+                if doc.elements().is_empty() {
+                    self.toast_info(nc_shell::copy::NOTHING_TO_EXPORT.into(), None);
+                } else {
+                    let (background, light) = self.export_look();
+                    let name = self.sketch_name().to_owned();
+                    self.exporter.export(
+                        doc.elements().to_vec(),
+                        &name,
+                        wireframe,
+                        background,
+                        light,
+                    );
+                    let now = self.now();
+                    self.exporting = Some(self.shell.toast(
+                        nc_shell::ToastKind::Progress,
+                        nc_shell::copy::EXPORTING,
+                        None,
+                        now,
+                    ));
+                }
+            }
+            Action::ZoomToSelection => {
+                if let Some(b) = select::bounds(doc, &self.selection) {
+                    self.animate_to(Viewport::fit(b, self.pane_size(), FIT_PADDING));
+                }
+            }
+            Action::ZoomIn | Action::ZoomOut => {
+                let factor = if action == Action::ZoomIn { 1.25 } else { 0.8 };
+                let mut target = self.viewport;
+                target.zoom_at(self.pane_size() * 0.5, factor);
+                self.animate_to(target);
+            }
+            Action::ToggleSidebar | Action::ToggleInspector => {
+                if action == Action::ToggleSidebar {
+                    self.settings.sidebar = !self.settings.sidebar;
+                } else {
+                    self.settings.inspector = !self.settings.inspector;
+                }
+                self.shell.sidebar = self.settings.sidebar;
+                self.shell.inspector = self.settings.inspector;
+                self.settings_writer.save(self.settings);
+            }
+            Action::Preferences => self.shell.dialog = nc_shell::Dialog::Preferences,
+            Action::Shortcuts => {
+                self.shell.dialog = if self.shell.dialog == nc_shell::Dialog::Shortcuts {
+                    nc_shell::Dialog::None
+                } else {
+                    nc_shell::Dialog::Shortcuts
+                }
             }
         }
         self.redraw();
-    }
-
-    fn set_notice(&mut self, notice: Option<String>) {
-        if self.notice != notice {
-            self.notice = notice;
-            self.update_title();
-        }
     }
 
     fn pasted(&mut self, elements: Vec<Element>, centre: Vec2) {
@@ -733,7 +880,10 @@ impl App {
     fn build_overlay(&mut self) -> bool {
         let mut overlay = std::mem::take(&mut self.overlay);
         overlay.clear();
+        let mut ink = std::mem::take(&mut self.ink_overlay);
+        ink.clear();
         let view = self.viewport;
+        let dark = self.dark();
         let mut predicted = false;
         match &self.drag {
             Some(Drag::Draw) => {
@@ -741,7 +891,7 @@ impl App {
                     && let Some(ahead) = self.predictor.predict(self.now(), self.refresh)
                 {
                     let last = stroke.points.len() - 1;
-                    overlay.push(Segment {
+                    ink.push(Segment {
                         a: stroke.points[last],
                         b: view.screen_to_world(ahead),
                         half_width: stroke.half_width(last),
@@ -752,17 +902,17 @@ impl App {
             }
             Some(Drag::Shape { kind, start }) => {
                 let preview = self.shape_to(*kind, *start).to_stroke();
-                overlay.extend(stroke_segments(&preview));
+                ink.extend(stroke_segments(&preview));
             }
             Some(Drag::Select(Gesture::Marquee { start, current })) => {
                 let r = Rect::from_points(
                     (start.x as f64, start.y as f64),
                     (current.x as f64, current.y as f64),
                 );
-                chrome::rect(&mut overlay, r, &view);
+                chrome::rect(&mut overlay, r, &view, dark);
             }
             Some(Drag::Select(Gesture::Lasso(points))) => {
-                chrome::polyline(&mut overlay, points, true, &view)
+                chrome::polyline(&mut overlay, points, true, &view, dark)
             }
             _ => {}
         }
@@ -772,15 +922,19 @@ impl App {
             let b = self
                 .lift_transform()
                 .map_or(b, |t| t.transform_rect_bbox(b));
-            chrome::selection(&mut overlay, b, &view);
+            chrome::selection(&mut overlay, b, &view, dark);
         }
         if let (true, Some(r)) = (self.wire_visible(), self.reviewing) {
-            chrome::highlight(&mut overlay, r, &view);
+            chrome::highlight(&mut overlay, r, &view, dark);
+        }
+        if let Some(s) = self.selected_wire() {
+            chrome::rect(&mut overlay, s.bounds.inflate(3.0, 3.0), &view, dark);
         }
         if self.split {
-            chrome::pane_divider(&mut overlay, self.pane_size(), &view);
+            chrome::pane_divider(&mut overlay, self.pane_size(), &view, dark);
         }
         self.overlay = overlay;
+        self.ink_overlay = ink;
         predicted
     }
 
@@ -788,6 +942,35 @@ impl App {
         match &self.drag {
             Some(Drag::Select(g)) => g.transform(),
             _ => None,
+        }
+    }
+
+    /// Touchpad panning: estimates the hand's speed, and lets the view glide on when the fingers lift.
+    fn track_pan(&mut self, delta: Vec2, phase: TouchPhase) {
+        let now = self.now();
+        match phase {
+            TouchPhase::Started => {
+                self.pan_velocity = Vec2::ZERO;
+                self.last_pan = Some(now);
+            }
+            TouchPhase::Moved => {
+                if let Some(last) = self.last_pan {
+                    let dt = (now - last).max(1e-3) as f32;
+                    // A short running average: the last few events decide the glide.
+                    self.pan_velocity = self.pan_velocity * 0.6 + (delta / dt) * 0.4;
+                }
+                self.last_pan = Some(now);
+            }
+            TouchPhase::Ended => {
+                let fresh = self.last_pan.is_some_and(|l| now - l < 0.05);
+                if fresh && !self.reduced_motion && self.pan_velocity.length() > 2.0 * INERTIA_STOP
+                {
+                    self.inertia = Some(now);
+                    self.redraw();
+                }
+                self.last_pan = None;
+            }
+            TouchPhase::Cancelled => self.last_pan = None,
         }
     }
 
@@ -854,6 +1037,7 @@ impl App {
                 self.animation = None;
             }
         }
+        self.coast();
         let doc = self.session.doc();
         if self.wire_visible() && self.requested != Some(doc.revision()) {
             self.requested = Some(doc.revision());
@@ -865,8 +1049,14 @@ impl App {
         }
         // A predicted tail must retract once the hand stops: keep drawing until the predictor gives up.
         let predicted = self.build_overlay();
+        if self.wireframe.is_some() && self.wire_light == self.dark() {
+            self.redraw_wireframe();
+        }
+        self.update_thumbnails();
+        self.build_chrome();
         let lift = self.lift_transform();
         let (show_wire, blend) = (self.wire_visible(), self.blend());
+        let (theme, grid) = (self.palette().canvas, self.settings.grid);
         let Some(g) = &mut self.gpu else { return };
         let id = self.next_frame;
         let live = self.live.as_ref().map(|stroke| LiveStroke {
@@ -888,10 +1078,13 @@ impl App {
             wire,
             blend,
             split: self.split,
+            ink_overlay: &self.ink_overlay,
             overlay: &self.overlay,
+            theme,
+            grid,
         };
         let wl = &self.wl;
-        let drawn = g.draw(&scene, &self.viewport, || {
+        let drawn = g.draw(&scene, self.shell.scene(), &self.viewport, || {
             if let Some(wl) = wl {
                 wl.request_feedback(id);
             }
@@ -919,8 +1112,22 @@ impl App {
                 self.in_flight.pop_front();
             }
         }
-        if self.animation.is_some() || predicted {
+        if self.animation.is_some() || predicted || self.inertia.is_some() {
             self.redraw();
+        }
+    }
+
+    /// Touchpad pan inertia: the view keeps gliding after the fingers lift, slowing smoothly. Any
+    /// other input stops it (`take_view`); reduced motion never starts it.
+    fn coast(&mut self) {
+        let Some(last) = self.inertia else { return };
+        let now = self.now();
+        let dt = (now - last) as f32;
+        self.inertia = Some(now);
+        self.viewport.pan_by_screen(self.pan_velocity * dt);
+        self.pan_velocity *= (-dt / INERTIA_DECAY).exp();
+        if self.pan_velocity.length() < INERTIA_STOP {
+            self.inertia = None;
         }
     }
 
@@ -930,7 +1137,7 @@ impl App {
         if self.drag.is_some() {
             self.release();
         }
-        match self.store.flush() {
+        match self.store.as_ref().map_or(Ok(()), Store::flush) {
             Ok(()) => {}
             Err(e) if forced || self.close_blocked => {
                 eprintln!("neuralcanvas: quitting with unsaved changes: {e}");
@@ -938,11 +1145,12 @@ impl App {
             Err(e) => {
                 self.save_error = Some(e.to_string());
                 self.close_blocked = true;
-                self.update_title();
+                self.redraw();
                 return;
             }
         }
         // Wayland proxies must go before winit closes the display.
+        self.access = None;
         self.wl = None;
         self.gpu = None;
         event_loop.exit();
@@ -959,41 +1167,85 @@ impl ApplicationHandler<UserEvent> for App {
                 .ok()
                 .map(|c| event_loop.create_custom_cursor(c));
             gpu.window.set_cursor(CursorIcon::Crosshair);
+            // The accessibility adapter must exist before the window is first shown.
+            self.access = Some(accesskit_winit::Adapter::with_event_loop_proxy(
+                event_loop,
+                &gpu.window,
+                self.proxy.clone(),
+            ));
+            gpu.window.set_visible(true);
             gpu.window.request_redraw();
             self.gpu = Some(gpu);
+            self.refresh_projects();
             self.update_title();
         }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Store(StoreEvent::Saved { .. }) if self.save_error.is_some() => {
+            UserEvent::Store(StoreEvent::Saved { sketch, revision }) => {
+                if sketch == self.session.sketch_id {
+                    self.saved_revision = self.saved_revision.max(revision);
+                }
                 self.save_error = None;
                 self.close_blocked = false;
-                self.update_title();
+                self.redraw();
             }
-            UserEvent::Store(StoreEvent::Saved { .. }) => {}
             UserEvent::Store(StoreEvent::SaveFailed { message, .. }) => {
                 self.save_error = Some(message);
-                self.update_title();
+                self.redraw();
             }
             UserEvent::ReducedMotion(reduce) => self.reduced_motion = reduce,
+            UserEvent::ColorScheme(dark) => {
+                if dark != self.system_dark {
+                    self.system_dark = dark;
+                    self.forget_thumbnails();
+                    self.redraw();
+                }
+            }
             UserEvent::Pasted(elements, centre) => self.pasted(elements, centre),
-            UserEvent::ClipboardFailed(e) => self.set_notice(Some(e)),
+            UserEvent::ClipboardFailed(e) => self.toast_error(e),
+            UserEvent::Projects(result) => {
+                self.projects_loaded(result);
+                self.update_title();
+            }
+            UserEvent::SketchOpened { sketch, result } => {
+                self.saved_revision = 0;
+                self.sketch_opened(sketch, result);
+                self.update_title();
+            }
+            UserEvent::SketchCreated(result) => self.sketch_created(result),
+            UserEvent::Thumbnail { sketch, doc } => self.thumbnail_loaded(sketch, doc),
+            UserEvent::Access(event) => self.access_event(event.window_event),
             UserEvent::Recognized {
                 sketch,
                 revision,
                 wire,
             } => self.adopt_wireframe(sketch, revision, wire),
-            UserEvent::Exported(result) => self.set_notice(Some(match result {
-                Ok(base) => format!("Exported {} (SVG, PDF, PNG, JPEG)", base.display()),
-                Err(e) => format!("Export failed: {e}"),
-            })),
+            UserEvent::Exported(result) => {
+                if let Some(id) = self.exporting.take() {
+                    self.shell.dismiss(id);
+                }
+                match result {
+                    Ok(base) => {
+                        let name = base
+                            .file_name()
+                            .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+                        self.export_dir = base.parent().map(PathBuf::from);
+                        self.toast_info(
+                            nc_shell::copy::exported(&name),
+                            Some(nc_shell::ToastAction::OpenFolder),
+                        );
+                    }
+                    Err(e) => self.toast_error(nc_shell::copy::export_failed(&e)),
+                }
+            }
+            UserEvent::StoreOpened { result, dir } => self.store_opened(result, dir),
             UserEvent::Quit => self.quit(event_loop, true),
         }
     }
 
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(wl) = &mut self.wl {
             wl.dispatch();
         }
@@ -1002,11 +1254,26 @@ impl ApplicationHandler<UserEvent> for App {
         if self.draw_at.is_some_and(|at| mono_ns() >= at) {
             self.redraw();
         }
+        // Toasts leave by themselves: wake when the next one is due, unless a frame is already set.
+        let now = self.now();
+        let had = self.shell.toasts.len();
+        let next = self.shell.tick(now);
+        if self.shell.toasts.len() != had {
+            self.redraw();
+        }
+        if let (Some(at), None) = (next, self.draw_at) {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                self.epoch + Duration::from_secs_f64(at),
+            ));
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         #[cfg(feature = "profile")]
         let _span = tracy_client::span!("window_event");
+        if let (Some(access), Some(g)) = (&mut self.access, &self.gpu) {
+            access.process_event(&g.window, &event);
+        }
         match event {
             WindowEvent::CloseRequested => self.quit(event_loop, false),
             WindowEvent::Resized(size) => {
@@ -1015,10 +1282,17 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.redraw();
             }
-            WindowEvent::ScaleFactorChanged { .. } => self.redraw(),
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.forget_thumbnails();
+                self.redraw();
+            }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } => {
+                // The chrome first: a field being typed in wants repeats too.
+                if event.state == ElementState::Pressed && self.chrome_key(&event) {
+                    return;
+                }
                 if event.repeat {
                     return;
                 }
@@ -1066,7 +1340,17 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } if !self.tablet_near => {
                 let scale = self.gpu.as_ref().map_or(1.0, |g| g.window.scale_factor());
                 let p = Vec2::new((position.x / scale) as f32, (position.y / scale) as f32);
-                self.motion(self.to_pane(p), None);
+                self.window_cursor = p;
+                self.pointer_in_right_pane = self.split && p.x >= self.logical_size().x / 2.0;
+                // Over chrome, and not mid-drag on the canvas: the chrome has the pointer.
+                let over = self.drag.is_none() && self.chrome_hover(p);
+                if over != self.over_chrome {
+                    self.over_chrome = over;
+                    self.set_cursor();
+                }
+                if !over {
+                    self.motion(self.to_pane(p), None);
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
@@ -1078,13 +1362,35 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     MouseButton::Middle if matches!(self.drag, Some(Drag::Pan)) => self.release(),
                     MouseButton::Left if self.tablet_near => {}
-                    MouseButton::Left if pressed => self.press(self.cursor, None),
-                    MouseButton::Left => self.release(),
+                    MouseButton::Left if pressed => {
+                        if self.drag.is_none() && self.chrome_press(self.window_cursor) {
+                            return;
+                        }
+                        self.shell.focus = None;
+                        self.press(self.cursor, None);
+                    }
+                    MouseButton::Left if !self.chrome_release(self.window_cursor) => self.release(),
+                    MouseButton::Left => {}
                     _ => {}
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                if self.over_chrome {
+                    // Scrolls the sidebar list.
+                    let dy = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y * 40.0,
+                        MouseScrollDelta::PixelDelta(d) => d.y as f32,
+                    };
+                    self.shell.scroll = (self.shell.scroll - dy).max(0.0);
+                    self.redraw();
+                    return;
+                }
                 self.take_view();
+                if let MouseScrollDelta::PixelDelta(d) = delta
+                    && !self.modifiers.control_key()
+                {
+                    self.track_pan(Vec2::new(d.x as f32, d.y as f32), phase);
+                }
                 match delta {
                     // Wheel notches zoom around the cursor; exp() keeps speed device-independent.
                     MouseScrollDelta::LineDelta(_, y) => {

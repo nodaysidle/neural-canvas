@@ -88,6 +88,17 @@ impl Store {
         result.recv().map_err(|_| StoreError::Closed)?
     }
 
+    /// Runs `f` on the store thread after writing everything queued, then hands its result to `done`
+    /// there, without waiting: what the UI thread uses (sidebar, sketch switching). `done` typically
+    /// posts the result back to the event loop.
+    pub fn request<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Db) -> Result<T> + Send + 'static,
+        done: impl FnOnce(Result<T>) + Send + 'static,
+    ) {
+        self.send(Request::Call(Box::new(move |db| done(f(db)))));
+    }
+
     /// Runs `f` on the store thread after writing everything queued, and waits for its result.
     /// For loads and project/sketch management: rare, user-initiated, never per frame.
     pub fn call<T: Send + 'static>(

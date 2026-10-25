@@ -1,0 +1,12 @@
+[package]
+name = "nc-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nc-core.workspace = true
+nc-render.workspace = true
+nc-store.workspace = true
+glam.workspace = true
+uuid.workspace = true

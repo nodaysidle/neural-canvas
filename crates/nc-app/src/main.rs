@@ -9,9 +9,13 @@ mod gpu;
 mod workers;
 
 use app::App;
-use nc_core::{Document, Session};
+use nc_core::Session;
 use nc_store::{Store, StoreError, StoreEvent};
+use std::path::{Path, PathBuf};
 use winit::event_loop::{EventLoop, EventLoopProxy};
+
+/// An open store, the sketch it opened on, and whether that sketch is read-only.
+pub type Opened = (Store, Session, bool);
 
 /// Wakes the event loop from other threads.
 pub enum UserEvent {
@@ -31,31 +35,61 @@ pub enum UserEvent {
     },
     /// Export finished: the files' shared path without extension, or what went wrong.
     Exported(Result<std::path::PathBuf, String>),
+    /// The desktop's colour scheme: true for dark.
+    ColorScheme(bool),
+    Projects(Result<Vec<nc_store::ProjectInfo>, String>),
+    SketchOpened {
+        sketch: uuid::Uuid,
+        result: Result<nc_core::Document, String>,
+    },
+    SketchCreated(Result<uuid::Uuid, String>),
+    /// Another sketch, loaded for its sidebar thumbnail.
+    Thumbnail {
+        sketch: uuid::Uuid,
+        doc: nc_core::Document,
+    },
+    /// The screen reader asked for something.
+    Access(accesskit_winit::Event),
+    /// A retry, or a newly chosen folder, for a store that would not open. `result` is `None` when the
+    /// folder chooser was cancelled; `dir` is the chosen folder.
+    StoreOpened {
+        result: Option<Result<Box<Opened>, String>>,
+        dir: Option<PathBuf>,
+    },
 }
 
-/// Opens the store and the most recent sketch. A damaged sketch opens read-only and empty; anything
-/// else that stops us saving is fatal, before any drawing can happen (Mac bug #4).
-fn open(proxy: EventLoopProxy<UserEvent>) -> Result<(Store, Session, bool), StoreError> {
-    let path = dirs::data_dir()
-        .ok_or_else(|| {
-            StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no home or XDG data directory",
-            ))
-        })?
-        .join("neuralcanvas")
-        .join("neuralcanvas.db");
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        Self::Access(event)
+    }
+}
+
+/// Opens the store (in `dir`, else the XDG data directory) and the most recent sketch. A damaged
+/// sketch opens read-only with what can be read; anything else that stops us saving is an error, and
+/// the app blocks drawing until a retry or another folder works (Mac bug #4).
+pub fn open(proxy: EventLoopProxy<UserEvent>, dir: Option<&Path>) -> Result<Opened, StoreError> {
+    let dir = match dir {
+        Some(dir) => dir.to_path_buf(),
+        None => dirs::data_dir()
+            .ok_or_else(|| {
+                StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no home or XDG data directory",
+                ))
+            })?
+            .join("neuralcanvas"),
+    };
+    let path = dir.join("neuralcanvas.db");
     let store = Store::open(path, move |event| {
         let _ = proxy.send_event(UserEvent::Store(event));
     })?;
     let sketch = store.call(|db| db.last_or_new_sketch())?;
     match store.call(move |db| db.load(sketch)) {
         Ok(doc) => Ok((store, Session::new(sketch, doc), false)),
-        // shortcut: opens empty instead of showing the readable rows; a partial load needs the Phase 5
-        // UI to explain what is missing.
         Err(e @ StoreError::Corrupt { .. }) => {
             eprintln!("neuralcanvas: opening read-only: {e}");
-            Ok((store, Session::new(sketch, Document::default()), true))
+            let doc = store.call(move |db| db.load_readable(sketch))?;
+            Ok((store, Session::new(sketch, doc), true))
         }
         Err(e) => Err(e),
     }
@@ -74,15 +108,11 @@ fn main() {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("event loop");
-    let (store, session, read_only) = match open(event_loop.create_proxy()) {
-        Ok(opened) => opened,
-        // shortcut: stderr and exit, before any window; the Phase 5 shell turns this into the blocking
-        // Retry / Choose location / Quit dialog (docs/PLAN.md §4, bug #4).
-        Err(e) => {
-            eprintln!("neuralcanvas: cannot open the sketch store, nothing would be saved: {e}");
-            std::process::exit(1);
-        }
-    };
+    let (settings, store_dir) = app::settings::load();
+    let opened = open(event_loop.create_proxy(), store_dir.as_deref()).map_err(|e| {
+        eprintln!("neuralcanvas: cannot open the sketch store, nothing would be saved: {e}");
+        e.to_string()
+    });
     let signals = signal_hook::iterator::Signals::new([
         signal_hook::consts::SIGTERM,
         signal_hook::consts::SIGINT,
@@ -97,10 +127,16 @@ fn main() {
         }
     });
     let proxy = event_loop.create_proxy();
-    // Kept alive for the whole run: dropping it stops the updates.
-    let _reduced_motion = mundy::Preferences::subscribe(mundy::Interest::ReducedMotion, move |p| {
-        let _ = proxy.send_event(UserEvent::ReducedMotion(p.reduced_motion.is_reduce()));
-    });
-    let mut app = App::new(store, session, read_only, event_loop.create_proxy());
+    // Kept alive for the whole run: dropping it stops the updates. "No preference" counts as dark,
+    // the app's default (DESIGN.md).
+    let _preferences = mundy::Preferences::subscribe(
+        mundy::Interest::ReducedMotion | mundy::Interest::ColorScheme,
+        move |p| {
+            let _ = proxy.send_event(UserEvent::ReducedMotion(p.reduced_motion.is_reduce()));
+            let dark = p.color_scheme != mundy::ColorScheme::Light;
+            let _ = proxy.send_event(UserEvent::ColorScheme(dark));
+        },
+    );
+    let mut app = App::new(opened, event_loop.create_proxy(), settings, store_dir);
     event_loop.run_app(&mut app).expect("run app");
 }

@@ -30,9 +30,10 @@ by raw winit (today) or an iced `shader` widget (Phase 5) unchanged.
 ```
 crates/
   nc-core/     document, strokes, viewport maths. No GPU, no window. Unit-tested.
-  nc-render/   wgpu renderer: grid + instanced SDF capsule strokes (canvas.wgsl). Offscreen-tested.
+  nc-render/   wgpu renderer: grid, instanced SDF capsule strokes, UI pass (rects, images, glyphon text).
   nc-store/    SQLite (WAL) persistence on its own thread: one row per element, 300 ms debounce.
   nc-export/   SVG writer; PDF (svg2pdf), PNG and JPEG (resvg); raw sketch and wireframe.
+  nc-shell/    shell layout (bar, palette, sidebar, inspector, toasts, dialogs) and all UI copy. No GPU.
   nc-wayland/  Wayland side channel: presentation feedback and tablet (pen pressure, eraser) input.
   nc-bench/    measurement harness (S2k frame pacing, scanout latency, save cost). Never packaged.
   spike-iced/  Phase 0 iced host spike, kept to rerun the shell decision.

@@ -14,6 +14,7 @@ pub mod scene;
 pub mod schedule;
 pub mod select;
 pub mod shape;
+pub mod theme;
 pub mod tools;
 
 pub use actions::{Action, Key, Shortcut};

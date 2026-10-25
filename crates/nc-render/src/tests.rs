@@ -50,6 +50,27 @@ impl Gpu {
         logical: u32,
         scale: f32,
     ) -> Image {
+        self.capture(logical, scale, |enc, view, size| {
+            r.render(
+                &self.device,
+                &self.queue,
+                enc,
+                view,
+                scene,
+                viewport,
+                size,
+                scale,
+            )
+        })
+    }
+
+    /// Runs `draw` into a fresh `logical` × `logical` px target at `scale` and reads it back.
+    fn capture(
+        &self,
+        logical: u32,
+        scale: f32,
+        draw: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView, [f32; 2]),
+    ) -> Image {
         let px = (logical as f32 * scale).round() as u32;
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -75,16 +96,7 @@ impl Gpu {
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
         let size = px as f32 / scale;
-        r.render(
-            &self.device,
-            &self.queue,
-            &mut enc,
-            &view,
-            scene,
-            viewport,
-            [size, size],
-            scale,
-        );
+        draw(&mut enc, &view, [size, size]);
         enc.copy_texture_to_buffer(
             tex.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -601,4 +613,111 @@ fn golden_grid_at_fractional_scales() {
         let img = render_one(&gpu, &Document::default(), scale);
         assert_golden(name, &img);
     }
+}
+
+/// Chrome: a bordered panel, an image clipped to its radius, and text in both faces, at 1× and 1.5×.
+#[test]
+fn ui_rects_images_and_text() {
+    use crate::ui::{Font, Measure, UiImage, UiRect, UiRenderer, UiScene, UiText};
+    let Some(gpu) = Gpu::new() else { return };
+    let mut ui = UiRenderer::new(&gpu.device, &gpu.queue, FORMAT);
+    // The image: a solid red texture.
+    let view = ui.image_target(&gpu.device, 7, 16, 16).clone();
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: None,
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    gpu.queue.submit([enc.finish()]);
+
+    let mut scene = UiScene::default();
+    scene.base.rects.push(UiRect {
+        rect: [4.0, 4.0, 56.0, 24.0],
+        fill: BLUE,
+        border: GREEN,
+        radius: 6.0,
+        border_width: 1.0,
+    });
+    scene.base.images.push(UiImage {
+        id: 7,
+        rect: [4.0, 36.0, 24.0, 24.0],
+        radius: 4.0,
+    });
+    scene.popup.texts.push(UiText {
+        text: "Pen".into(),
+        at: [34.0, 36.0],
+        size: 16.0,
+        font: Font::Sans,
+        color: [1.0; 4],
+        width: None,
+    });
+    for scale in [1.0, 1.5] {
+        let img = gpu.capture(64, scale, |enc, view, size| {
+            let mut canvas = Renderer::new(&gpu.device, FORMAT);
+            canvas.render(
+                &gpu.device,
+                &gpu.queue,
+                enc,
+                view,
+                &Scene::doc(&Document::default()),
+                &Viewport::default(),
+                size,
+                scale,
+            );
+            ui.render(&gpu.device, &gpu.queue, enc, view, &scene, size, scale);
+        });
+        let px = |x: f32, y: f32| img.at((x * scale) as u32, (y * scale) as u32);
+        assert!(px(32.0, 16.0)[2] > 240, "panel fill: {:?}", px(32.0, 16.0));
+        assert!(px(32.0, 4.4)[1] > 200, "1 px border: {:?}", px(32.0, 4.4));
+        assert!(
+            px(4.3, 4.3)[3] == 255 && px(4.3, 4.3)[2] < 80,
+            "rounded corner left clear"
+        );
+        assert!(px(16.0, 48.0)[0] > 240, "image: {:?}", px(16.0, 48.0));
+        let lit = (34..60)
+            .flat_map(|x| (36..56).map(move |y| (x, y)))
+            .filter(|&(x, y)| px(x as f32, y as f32)[1] > 200)
+            .count();
+        assert!(lit > 20, "text drawn at {scale}x ({lit} lit px)");
+    }
+    let (wide, narrow) = (
+        ui.width("WWWW", 16.0, Font::Sans),
+        ui.width("iiii", 16.0, Font::Sans),
+    );
+    assert!(wide > 2.0 * narrow, "proportional: {wide} vs {narrow}");
+    let (a, b) = (
+        ui.width("WWWW", 16.0, Font::Mono),
+        ui.width("iiii", 16.0, Font::Mono),
+    );
+    assert!((a - b).abs() < 0.01, "monospace: {a} vs {b}");
+}
+
+/// Light theme: light background, and the default (white-ish) ink drawn dark.
+#[test]
+fn light_theme_inverts_ink_lightness() {
+    let Some(gpu) = Gpu::new() else { return };
+    let doc = Document::from_elements([stroke(
+        Vec2::new(4.0, 32.0),
+        Vec2::new(60.0, 32.0),
+        6.0,
+        INK,
+    )]);
+    let mut r = Renderer::new(&gpu.device, FORMAT);
+    let scene = Scene {
+        theme: CanvasTheme::LIGHT,
+        ..Scene::doc(&doc)
+    };
+    let img = gpu.frame_with(&mut r, &scene, &Viewport::default(), 64, 1.0);
+    let (ink, paper) = (img.at(32, 32), img.at(32, 8));
+    assert!(paper[0] > 200 && paper[1] > 200, "light paper: {paper:?}");
+    assert!(ink[0] < 60 && ink[1] < 60, "dark ink: {ink:?}");
 }

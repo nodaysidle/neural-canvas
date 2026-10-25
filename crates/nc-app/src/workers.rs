@@ -76,7 +76,12 @@ impl Recognizer {
 
 struct ExportJob {
     elements: Vec<Arc<Element>>,
+    /// The sketch's name: files are called after it.
+    name: String,
     wireframe: bool,
+    /// The canvas look: exports look like the canvas.
+    background: [f32; 4],
+    light: bool,
 }
 
 pub struct Exporter {
@@ -87,15 +92,14 @@ pub struct Exporter {
 const RASTER_SCALE: f32 = 2.0;
 
 impl Exporter {
-    /// `background` is the canvas colour: exports look like the canvas.
-    pub fn new(proxy: EventLoopProxy<UserEvent>, background: [f32; 4]) -> Self {
+    pub fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
         let (tx, rx) = unbounded::<ExportJob>();
         std::thread::Builder::new()
             .name("export".into())
             .spawn(move || {
                 idle_priority();
                 for job in rx {
-                    let result = export(&job, background).map_err(|e| e.to_string());
+                    let result = export(&job).map_err(|e| e.to_string());
                     if proxy.send_event(UserEvent::Exported(result)).is_err() {
                         break;
                     }
@@ -105,10 +109,20 @@ impl Exporter {
         Self { tx }
     }
 
-    pub fn export(&self, elements: Vec<Arc<Element>>, wireframe: bool) {
+    pub fn export(
+        &self,
+        elements: Vec<Arc<Element>>,
+        name: &str,
+        wireframe: bool,
+        background: [f32; 4],
+        light: bool,
+    ) {
         let _ = self.tx.send(ExportJob {
             elements,
+            name: name.into(),
             wireframe,
+            background,
+            light,
         });
     }
 }
@@ -120,6 +134,18 @@ fn export_dir() -> Option<PathBuf> {
             .or_else(dirs::home_dir)?
             .join("NeuralCanvas"),
     )
+}
+
+/// A file name stem from a sketch name: no path separators, never empty.
+fn stem(name: &str, wireframe: bool) -> String {
+    let name = name.replace(['/', '\\', '\0'], "-");
+    let name = name.trim();
+    let name = if name.is_empty() { "Sketch" } else { name };
+    if wireframe {
+        format!("{name} wireframe")
+    } else {
+        name.into()
+    }
 }
 
 /// The first `<dir>/<stem> N` with none of the four files taken, so nothing is overwritten.
@@ -135,17 +161,18 @@ fn free_base(dir: &Path, stem: &str) -> PathBuf {
 }
 
 /// Writes SVG, PDF, PNG and JPEG; returns the shared path without extension.
-fn export(job: &ExportJob, background: [f32; 4]) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn export(job: &ExportJob) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let (background, light) = (job.background, job.light);
     let svg = if job.wireframe {
         let wire: Wireframe = recognize(&job.elements);
-        nc_export::wireframe_svg(&wire, Some(background))
+        nc_export::wireframe_svg(&wire, Some(background), light)
     } else {
-        nc_export::svg(&job.elements, Some(background))
+        nc_export::svg(&job.elements, Some(background), light)
     }
     .ok_or("the sketch is empty")?;
     let dir = export_dir().ok_or("no home directory to export to")?;
     std::fs::create_dir_all(&dir)?;
-    let base = free_base(&dir, if job.wireframe { "Wireframe" } else { "Sketch" });
+    let base = free_base(&dir, &stem(&job.name, job.wireframe));
     std::fs::write(base.with_extension("svg"), &svg)?;
     std::fs::write(base.with_extension("pdf"), nc_export::pdf(&svg)?)?;
     std::fs::write(
@@ -157,6 +184,34 @@ fn export(job: &ExportJob, background: [f32; 4]) -> Result<PathBuf, Box<dyn std:
         nc_export::jpeg(&svg, RASTER_SCALE)?,
     )?;
     Ok(base)
+}
+
+/// Asks the desktop's file chooser (the XDG portal) for a folder. `Ok(None)`: the person cancelled.
+/// Blocks, so call it on a worker.
+pub fn pick_folder(title: &str) -> Result<Option<PathBuf>, String> {
+    use ashpd::desktop::{ResponseError, file_chooser::SelectedFiles};
+    async_io::block_on(async {
+        let request = SelectedFiles::open_file()
+            .title(title)
+            .directory(true)
+            .modal(true)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        match request.response() {
+            Ok(files) => Ok(files.uris().first().and_then(|u| file_path(u.as_str()))),
+            Err(ashpd::Error::Response(ResponseError::Cancelled)) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+}
+
+/// The local path of a `file://` URI, percent-decoded byte for byte (paths need not be UTF-8).
+fn file_path(uri: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let path = uri.strip_prefix("file://")?;
+    let bytes: Vec<u8> = percent_encoding::percent_decode_str(path).collect();
+    Some(std::ffi::OsString::from_vec(bytes).into())
 }
 
 #[cfg(test)]
@@ -175,5 +230,22 @@ mod tests {
             "any one format taken"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_stems_come_from_the_sketch_name_and_stay_in_the_folder() {
+        assert_eq!(stem("Login flow", false), "Login flow");
+        assert_eq!(stem("Login flow", true), "Login flow wireframe");
+        assert_eq!(stem("../a/b", false), "..-a-b");
+        assert_eq!(stem("  ", false), "Sketch");
+    }
+
+    #[test]
+    fn portal_uris_become_local_paths() {
+        assert_eq!(
+            file_path("file:///home/a/My%20Sketches"),
+            Some(PathBuf::from("/home/a/My Sketches"))
+        );
+        assert_eq!(file_path("https://example.com/x"), None);
     }
 }

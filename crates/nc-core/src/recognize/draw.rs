@@ -7,11 +7,51 @@ use crate::element::{ShapeType, Stroke};
 use glam::Vec2;
 use kurbo::{Ellipse, PathEl, Rect, RoundedRect, Shape};
 
+/// Label text size, world units.
+pub const LABEL_SIZE: f32 = 14.0;
+
+/// Where an element's label goes: the point and whether it is centred on it (else it starts there,
+/// vertically centred). `None` without a label.
+pub fn label_anchor(s: &Recognized) -> Option<(Vec2, bool)> {
+    if s.label.is_empty() {
+        return None;
+    }
+    let r = s.bounds;
+    let mid_y = r.center().y;
+    Some(match s.shape_type {
+        ShapeType::Button
+        | ShapeType::Icon
+        | ShapeType::Circle
+        | ShapeType::Ellipse
+        | ShapeType::Image => (v(r.center().x, mid_y), true),
+        ShapeType::InputField => (v(r.x0 + r.width() * 0.06, mid_y), false),
+        ShapeType::Text | ShapeType::Line | ShapeType::Divider | ShapeType::Arrow => {
+            (v(r.x0, mid_y), false)
+        }
+        // Containers name their content: top-left, inside.
+        _ => (v(r.x0 + 12.0, r.y0 + 12.0 + LABEL_SIZE as f64 / 2.0), false),
+    })
+}
+
 /// Wireframe line width, world units.
 pub const LINE_WIDTH: f32 = 2.0;
-/// Linear RGB: the wireframe, and elements the quality gate flags.
+/// Linear RGB: the wireframe, and elements the quality gate flags, on the dark canvas.
 pub const WIRE: [f32; 4] = [0.45, 0.68, 1.0, 1.0];
 pub const UNCERTAIN: [f32; 4] = [1.0, 0.6, 0.15, 1.0];
+/// The same on the light canvas: the accent blue (#1f5fd1) and a deep amber (#9a5a00). Not the ink
+/// inversion: the wireframe must stay distinct from the ink it sits on.
+pub const WIRE_LIGHT: [f32; 4] = [0.0137, 0.1145, 0.637, 1.0];
+pub const UNCERTAIN_LIGHT: [f32; 4] = [0.323, 0.102, 0.0, 1.0];
+
+/// The colour an element's wireframe is drawn in.
+pub fn color(light: bool, uncertain: bool) -> [f32; 4] {
+    match (light, uncertain) {
+        (false, false) => WIRE,
+        (false, true) => UNCERTAIN,
+        (true, false) => WIRE_LIGHT,
+        (true, true) => UNCERTAIN_LIGHT,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mark {
@@ -58,13 +98,18 @@ pub fn marks(s: &Recognized, out: &mut Vec<Mark>) {
         | ShapeType::Card
         | ShapeType::Container
         | ShapeType::Unknown => out.push(Mark::Rect { rect: r, radius }),
+        // A label replaces the placeholder bar.
         ShapeType::Button => {
             out.push(Mark::Rect { rect: r, radius });
-            out.push(bar(r, 0.3, 0.4, 0.25));
+            if s.label.is_empty() {
+                out.push(bar(r, 0.3, 0.4, 0.25));
+            }
         }
         ShapeType::InputField => {
             out.push(Mark::Rect { rect: r, radius });
-            out.push(bar(r, 0.06, 0.3, 0.2));
+            if s.label.is_empty() {
+                out.push(bar(r, 0.06, 0.3, 0.2));
+            }
         }
         ShapeType::Image => {
             out.push(Mark::Rect {
@@ -99,7 +144,8 @@ pub fn marks(s: &Recognized, out: &mut Vec<Mark>) {
                 });
             }
         }
-        ShapeType::Text => out.push(bar(r, 0.0, 1.0, 0.6)),
+        ShapeType::Text if s.label.is_empty() => out.push(bar(r, 0.0, 1.0, 0.6)),
+        ShapeType::Text => {}
     }
 }
 
@@ -154,12 +200,12 @@ pub fn tessellate(mark: &Mark, color: [f32; 4], out: &mut Vec<Segment>) {
 }
 
 /// The whole wireframe as capsules, uncertain elements in their own colour.
-pub fn segments(wire: &Wireframe, out: &mut Vec<Segment>) {
+pub fn segments(wire: &Wireframe, light: bool, out: &mut Vec<Segment>) {
     let mut marks = Vec::new();
     for s in &wire.shapes {
         marks.clear();
         self::marks(s, &mut marks);
-        let color = if s.is_uncertain() { UNCERTAIN } else { WIRE };
+        let color = color(light, s.is_uncertain());
         marks.iter().for_each(|m| tessellate(m, color, out));
     }
 }
@@ -222,7 +268,7 @@ mod tests {
             ..Wireframe::default()
         };
         let mut out = Vec::new();
-        segments(&wire, &mut out);
+        segments(&wire, false, &mut out);
         assert!(out.iter().any(|s| s.color == WIRE));
         assert!(out.iter().any(|s| s.color == UNCERTAIN));
         assert!(out.iter().all(|s| s.a.is_finite() && s.b.is_finite()));

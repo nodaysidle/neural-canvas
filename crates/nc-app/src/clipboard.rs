@@ -12,7 +12,8 @@ use winit::event_loop::EventLoopProxy;
 use wl_clipboard_rs::{copy, paste};
 
 enum Request {
-    Copy(Vec<Arc<Element>>),
+    /// Elements in z-order, and the canvas look: background and whether ink shows lightness-inverted.
+    Copy(Vec<Arc<Element>>, [f32; 4], bool),
     Paste(Vec2),
 }
 
@@ -24,8 +25,7 @@ pub struct Clipboard {
 const PNG_SCALE: f32 = 2.0;
 
 impl Clipboard {
-    /// `background` is the canvas colour, so the image pasted elsewhere looks like the canvas.
-    pub fn new(proxy: EventLoopProxy<UserEvent>, background: [f32; 4]) -> Self {
+    pub fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("clipboard".into())
@@ -33,14 +33,20 @@ impl Clipboard {
                 crate::workers::idle_priority();
                 for request in rx {
                     let event = match request {
-                        Request::Copy(elements) => match copy_out(&elements, background) {
-                            Ok(()) => continue,
-                            Err(e) => UserEvent::ClipboardFailed(format!("copy failed: {e}")),
-                        },
+                        Request::Copy(elements, background, light) => {
+                            match copy_out(&elements, background, light) {
+                                Ok(()) => continue,
+                                Err(e) => UserEvent::ClipboardFailed(nc_shell::copy::copy_failed(
+                                    &e.to_string(),
+                                )),
+                            }
+                        }
                         Request::Paste(centre) => match paste_in() {
                             Ok(Some(elements)) => UserEvent::Pasted(elements, centre),
                             Ok(None) => continue,
-                            Err(e) => UserEvent::ClipboardFailed(format!("paste failed: {e}")),
+                            Err(e) => UserEvent::ClipboardFailed(nc_shell::copy::paste_failed(
+                                &e.to_string(),
+                            )),
                         },
                     };
                     let _ = proxy.send_event(event);
@@ -50,9 +56,9 @@ impl Clipboard {
         Self { tx }
     }
 
-    /// `elements` in z-order.
-    pub fn copy(&self, elements: Vec<Arc<Element>>) {
-        let _ = self.tx.send(Request::Copy(elements));
+    /// `elements` in z-order; `background` and `light` give the pasted image the canvas's look.
+    pub fn copy(&self, elements: Vec<Arc<Element>>, background: [f32; 4], light: bool) {
+        let _ = self.tx.send(Request::Copy(elements, background, light));
     }
 
     /// Pasted elements arrive as [`UserEvent::Pasted`], to be centred on `centre` (world units).
@@ -65,12 +71,13 @@ impl Clipboard {
 fn copy_out(
     elements: &[Arc<Element>],
     background: [f32; 4],
+    light: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut sources = vec![copy::MimeSource {
         source: copy::Source::Bytes(encode(elements).into()),
         mime_type: copy::MimeType::Specific(CLIPBOARD_MIME.into()),
     }];
-    if let Some(svg) = nc_export::svg(elements, Some(background)) {
+    if let Some(svg) = nc_export::svg(elements, Some(background), light) {
         let png = nc_export::png(&svg, PNG_SCALE)?;
         sources.push(copy::MimeSource {
             source: copy::Source::Bytes(svg.into_bytes().into()),

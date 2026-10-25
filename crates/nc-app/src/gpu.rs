@@ -1,7 +1,8 @@
-//! The window's wgpu surface and the canvas renderer.
+//! The window's wgpu surface, the canvas renderer, the chrome renderer, and the thumbnail renderer.
 
-use nc_core::Viewport;
-use nc_render::{Renderer, Scene};
+use nc_core::{Document, Rect, Viewport};
+use nc_render::ui::{IMAGE_FORMAT, UiRenderer, UiScene};
+use nc_render::{CanvasTheme, Renderer, Scene};
 use std::sync::Arc;
 use winit::event_loop::ActiveEventLoop;
 use winit::platform::wayland::WindowAttributesExtWayland;
@@ -16,13 +17,18 @@ pub struct Gpu {
     queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
+    pub ui: UiRenderer,
+    /// Draws sketches into thumbnail images (its own arena: thumbnails never disturb the canvas's).
+    thumbs: Renderer,
 }
 
 impl Gpu {
+    /// Creates the window hidden: the accessibility adapter must exist before it is first shown.
     pub fn new(event_loop: &ActiveEventLoop) -> Self {
         let attrs = Window::default_attributes()
             .with_title("NeuralCanvas")
             .with_name(APP_ID, "")
+            .with_visible(false)
             .with_min_inner_size(winit::dpi::LogicalSize::new(640.0, 480.0))
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
@@ -57,6 +63,8 @@ impl Gpu {
         config.desired_maximum_frame_latency = 1; // shortest input-to-photon queue
         surface.configure(&device, &config);
         let renderer = Renderer::new(&device, config.format);
+        let ui = UiRenderer::new(&device, &queue, config.format);
+        let thumbs = Renderer::new(&device, IMAGE_FORMAT);
         Self {
             window,
             surface,
@@ -64,6 +72,8 @@ impl Gpu {
             queue,
             config,
             renderer,
+            ui,
+            thumbs,
         }
     }
 
@@ -73,11 +83,54 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Draws and presents one frame. `before_present` runs right before the commit (presentation
-    /// feedback must be requested then). Returns false if no frame was presented.
+    /// Draws `doc` fitted into thumbnail image `id` (`size` logical px), for the sidebar.
+    pub fn thumbnail(&mut self, id: u64, doc: &Document, size: [f32; 2], theme: CanvasTheme) {
+        let scale = self.window.scale_factor() as f32;
+        let (w, h) = (
+            (size[0] * scale).round() as u32,
+            (size[1] * scale).round() as u32,
+        );
+        let view = self
+            .ui
+            .image_target(&self.device, id, w.max(1), h.max(1))
+            .clone();
+        // Not `Viewport::fit`: a whole page in 70 px is far below the canvas's minimum zoom.
+        let fit = doc.bounds().map_or(Viewport::default(), |b: Rect| {
+            let area = glam::Vec2::new(size[0], size[1]);
+            let scale = ((area - glam::Vec2::splat(8.0))
+                / glam::Vec2::new(b.width() as f32, b.height() as f32).max(glam::Vec2::ONE))
+            .min_element();
+            let c = b.center();
+            Viewport {
+                scale,
+                offset: area * 0.5 - glam::Vec2::new(c.x as f32, c.y as f32) * scale,
+            }
+        });
+        let scene = Scene {
+            theme,
+            grid: false,
+            ..Scene::doc(doc)
+        };
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.thumbs.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &view,
+            &scene,
+            &fit,
+            size,
+            scale,
+        );
+        self.queue.submit([encoder.finish()]);
+    }
+
+    /// Draws and presents one frame: canvas, then chrome. `before_present` runs right before the
+    /// commit (presentation feedback must be requested then). Returns false if nothing was presented.
     pub fn draw(
         &mut self,
         scene: &Scene,
+        ui: &UiScene,
         viewport: &Viewport,
         before_present: impl FnOnce(),
     ) -> bool {
@@ -105,6 +158,15 @@ impl Gpu {
             &view,
             scene,
             viewport,
+            size,
+            scale,
+        );
+        self.ui.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &view,
+            ui,
             size,
             scale,
         );

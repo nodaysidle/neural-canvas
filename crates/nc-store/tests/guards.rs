@@ -119,6 +119,9 @@ fn new_sketch_is_empty_and_corrupt_sketch_is_an_error() {
         }) => assert_eq!((sketch, element), (full, victim)),
         other => panic!("expected Corrupt, got {other:?}"),
     }
+    let readable = db.load_readable(full).unwrap();
+    assert_eq!(readable.elements().len(), doc.elements().len() - 1);
+    assert!(readable.elements().iter().all(|e| e.id != victim));
     assert!(
         db.load(fresh).unwrap().elements().is_empty(),
         "other sketches still open"
@@ -237,4 +240,32 @@ fn kill_9_child() {
     loop {
         std::thread::sleep(Duration::from_secs(60));
     }
+}
+
+/// `request` returns at once and delivers the result on the store thread, after queued writes.
+#[test]
+fn requests_do_not_block_and_see_queued_saves() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("nc.db"), quiet).unwrap();
+    let sketch = store.call(|db| db.last_or_new_sketch()).unwrap();
+    let mut session = open_session(&store, sketch);
+    session
+        .execute("Draw", nc_core::Command::append(stroke(1.0)))
+        .unwrap();
+    save(&store, &session);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    store.request(
+        move |db| Ok(db.load(sketch)?.elements().len()),
+        move |result| tx.send(result.unwrap()).unwrap(),
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(50),
+        "returned at once"
+    );
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+        1,
+        "the queued save was written first"
+    );
 }

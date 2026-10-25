@@ -1,0 +1,34 @@
+application: 'neuralcanvas'
+  frame: 'Untitled Sketch · NeuralCanvas'
+    canvas: 'Sketch: 20 strokes, 0 shapes, 0 recognised elements' [focused]
+    button: 'Sketches'
+    entry: 'Untitled Sketch'
+    button: 'Keyboard shortcuts'
+    button: 'Inspector'
+    button: 'Export'
+    label: 'Saved'
+    toggle button: 'Sketch' [pressed]
+    toggle button: 'Hybrid'
+    toggle button: 'Wireframe'
+    toggle button: 'Side by side'
+    button: 'New project'
+    entry: 'My Project'
+    button: 'New sketch in My Project'
+    list item: 'Untitled Sketch' [selected]
+    toggle button: 'Select (V)'
+    toggle button: 'Pen (P)' [pressed]
+    toggle button: 'Eraser (E)'
+    toggle button: 'Hand (H)'
+    toggle button: 'Rectangle (R)'
+    toggle button: 'Ellipse (O)'
+    toggle button: 'Line (L)'
+    toggle button: 'Graphite' [pressed]
+    toggle button: 'Coral'
+    toggle button: 'Sky'
+    toggle button: 'Mint'
+    toggle button: 'Sun'
+    toggle button: 'Fine'
+    toggle button: 'Medium' [pressed]
+    toggle button: 'Bold'
+    toggle button: 'Marker'
+    button: '100 %, Zoom to fit'

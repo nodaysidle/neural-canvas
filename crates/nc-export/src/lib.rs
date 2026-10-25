@@ -30,8 +30,17 @@ fn paint(c: [f32; 4]) -> String {
     )
 }
 
-fn stroke_svg(out: &mut String, s: &Stroke) {
-    let color = paint(s.color);
+/// Ink as the chosen theme shows it: on a light canvas, lightness inverted (`nc_core::theme`).
+fn ink(c: [f32; 4], light: bool) -> [f32; 4] {
+    if light {
+        nc_core::theme::ink_on_light(c)
+    } else {
+        c
+    }
+}
+
+fn stroke_svg(out: &mut String, s: &Stroke, light: bool) {
+    let color = paint(ink(s.color, light));
     if s.pressure.is_empty() {
         let mut d = String::new();
         for (i, p) in s.points.iter().enumerate() {
@@ -93,7 +102,7 @@ fn header(bounds: Rect, background: Option<[f32; 4]>) -> String {
 
 /// An SVG document of `elements` (raw sketch) in z-order, cropped to their bounds, optionally on a solid
 /// `background`. `None` when nothing has bounds.
-pub fn svg(elements: &[Arc<Element>], background: Option<[f32; 4]>) -> Option<String> {
+pub fn svg(elements: &[Arc<Element>], background: Option<[f32; 4]>, light: bool) -> Option<String> {
     let b: Rect = elements
         .iter()
         .filter_map(|e| e.bounds())
@@ -101,7 +110,7 @@ pub fn svg(elements: &[Arc<Element>], background: Option<[f32; 4]>) -> Option<St
     let mut out = header(b, background);
     for e in elements {
         match &e.kind {
-            ElementKind::Stroke(s) => stroke_svg(&mut out, s),
+            ElementKind::Stroke(s) => stroke_svg(&mut out, s, light),
             ElementKind::Shape(s) => {
                 let r = Rect::from_points(
                     (s.from.x as f64, s.from.y as f64),
@@ -109,7 +118,7 @@ pub fn svg(elements: &[Arc<Element>], background: Option<[f32; 4]>) -> Option<St
                 );
                 let style = format!(
                     r#"fill="none" stroke="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round""#,
-                    paint(s.color),
+                    paint(ink(s.color, light)),
                     s.width
                 );
                 let _ = match s.kind {
@@ -146,7 +155,11 @@ pub fn svg(elements: &[Arc<Element>], background: Option<[f32; 4]>) -> Option<St
 
 /// The wireframe as SVG, drawn from the same marks as the canvas overlay (uncertain elements in their
 /// own colour). `None` when it is empty.
-pub fn wireframe_svg(wire: &Wireframe, background: Option<[f32; 4]>) -> Option<String> {
+pub fn wireframe_svg(
+    wire: &Wireframe,
+    background: Option<[f32; 4]>,
+    light: bool,
+) -> Option<String> {
     let b = wire
         .shapes
         .iter()
@@ -158,16 +171,24 @@ pub fn wireframe_svg(wire: &Wireframe, background: Option<[f32; 4]>) -> Option<S
     for shape in &wire.shapes {
         marks.clear();
         draw::marks(shape, &mut marks);
-        let color = if shape.is_uncertain() {
-            draw::UNCERTAIN
-        } else {
-            draw::WIRE
-        };
+        let color = draw::color(light, shape.is_uncertain());
         let stroke = format!(
             r#"fill="none" stroke="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round""#,
             paint(color),
             draw::LINE_WIDTH
         );
+        if let Some((at, centred)) = draw::label_anchor(shape) {
+            let _ = writeln!(
+                out,
+                r#"<text x="{:.2}" y="{:.2}" font-family="Manrope" font-size="{}" fill="{}" text-anchor="{}" dominant-baseline="central">{}</text>"#,
+                at.x,
+                at.y,
+                draw::LABEL_SIZE,
+                paint(color).replace("stroke-opacity", "fill-opacity"),
+                if centred { "middle" } else { "start" },
+                xml_escape(&shape.label)
+            );
+        }
         for m in &marks {
             let _ = match *m {
                 Mark::Rect { rect: r, radius } => writeln!(
@@ -220,12 +241,30 @@ impl std::fmt::Display for ExportError {
 
 impl std::error::Error for ExportError {}
 
-fn tree(svg: &str) -> Result<usvg::Tree, ExportError> {
-    usvg::Tree::from_str(svg, &usvg::Options::default()).map_err(|e| ExportError(e.to_string()))
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
+
+fn tree(svg: &str) -> Result<usvg::Tree, ExportError> {
+    // Labels render in the bundled Manrope, never a system font: the same output on every machine.
+    let mut options = usvg::Options::default();
+    let db = options.fontdb_mut();
+    db.load_font_data(nc_render::ui::fonts::MANROPE.to_vec());
+    db.load_font_data(nc_render::ui::fonts::MANROPE_SEMIBOLD.to_vec());
+    usvg::Tree::from_str(svg, &options).map_err(|e| ExportError(e.to_string()))
+}
+
+/// Raster exports never exceed this many pixels on their long side: a large sketch at 2× would
+/// otherwise need hundreds of MB. They render at the largest scale up to the one asked for that fits.
+pub const MAX_RASTER_PX: f32 = 8192.0;
 
 fn raster(svg: &str, scale: f32) -> Result<tiny_skia::Pixmap, ExportError> {
     let tree = tree(svg)?;
+    let long = tree.size().width().max(tree.size().height());
+    let scale = scale.min(MAX_RASTER_PX / long.max(1.0));
     let size = tree
         .size()
         .to_int_size()
@@ -305,7 +344,7 @@ mod tests {
 
     #[test]
     fn svg_keeps_y_down_and_native_shapes() {
-        let svg = svg(&doc(), None).unwrap();
+        let svg = svg(&doc(), None, false).unwrap();
         assert!(
             svg.contains(r#"<path d="M10.00 10.00 L90.00 10.00""#),
             "{svg}"
@@ -313,7 +352,7 @@ mod tests {
         assert!(svg.contains(r#"<rect x="10.00" y="30.00" width="80.00" height="30.00""#));
         assert!(svg.contains(r##"stroke="#ff0000""##));
         assert!(svg.contains(r#"viewBox="7.00 7.00 86.00 55.00""#), "{svg}");
-        assert!(super::svg(&[], None).is_none());
+        assert!(super::svg(&[], None, false).is_none());
     }
 
     fn wire() -> Wireframe {
@@ -322,10 +361,10 @@ mod tests {
 
     #[test]
     fn wireframe_svg_uses_native_elements_in_world_units() {
-        let svg = wireframe_svg(&wire(), None).unwrap();
+        let svg = wireframe_svg(&wire(), None, false).unwrap();
         assert!(svg.contains("<line "), "{svg}");
         assert!(svg.contains("<rect ") && svg.contains(" rx="), "{svg}");
-        assert!(wireframe_svg(&Wireframe::default(), None).is_none());
+        assert!(wireframe_svg(&Wireframe::default(), None, false).is_none());
     }
 
     /// Red (or wireframe blue) ink in the top band, the rectangle's edge in the bottom band, nothing
@@ -346,7 +385,7 @@ mod tests {
     /// "Top stays top": the stroke at y = 10 lands in the top rows of the PNG, the rectangle below it.
     #[test]
     fn png_renders_the_svg_the_right_way_up() {
-        let bytes = png(&svg(&doc(), None).unwrap(), 2.0).unwrap();
+        let bytes = png(&svg(&doc(), None, false).unwrap(), 2.0).unwrap();
         let pixmap = tiny_skia::Pixmap::decode_png(&bytes).unwrap();
         assert_eq!((pixmap.width(), pixmap.height()), (172, 110));
         let at = |x: u32, y: u32| pixmap.pixel(x, y).unwrap();
@@ -366,7 +405,7 @@ mod tests {
 
     #[test]
     fn jpeg_is_opaque_and_the_right_way_up() {
-        let svg = svg(&doc(), Some([0.0, 0.0, 0.0, 1.0])).unwrap();
+        let svg = svg(&doc(), Some([0.0, 0.0, 0.0, 1.0]), false).unwrap();
         let bytes = jpeg(&svg, 2.0).unwrap();
         let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
             .unwrap()
@@ -380,7 +419,7 @@ mod tests {
     /// Skipped without poppler.
     #[test]
     fn pdf_is_the_right_way_up_in_a_real_pdf_renderer() {
-        let pdf = pdf(&svg(&doc(), Some([0.0, 0.0, 0.0, 1.0])).unwrap()).unwrap();
+        let pdf = pdf(&svg(&doc(), Some([0.0, 0.0, 0.0, 1.0]), false).unwrap()).unwrap();
         assert!(pdf.starts_with(b"%PDF-"));
         let dir = std::env::temp_dir().join(format!("nc-export-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -416,7 +455,7 @@ mod tests {
     #[test]
     fn wireframe_png_is_the_right_way_up() {
         let w = wire();
-        let svg = wireframe_svg(&w, Some([0.0, 0.0, 0.0, 1.0])).unwrap();
+        let svg = wireframe_svg(&w, Some([0.0, 0.0, 0.0, 1.0]), false).unwrap();
         let png = tiny_skia::Pixmap::decode_png(&png(&svg, 2.0).unwrap()).unwrap();
         // Bounds grow by the wireframe line width (2) instead of 1: world y → row (y − 6) × 2.
         let y0 = w
@@ -435,6 +474,52 @@ mod tests {
             row(40.0),
             row(60.0),
             png.width() / 2,
+        );
+    }
+
+    /// Labels are written as text and rendered in the bundled face (no system fonts).
+    #[test]
+    fn wireframe_labels_are_written_and_rendered() {
+        let render = |label: &str| {
+            let mut w = wire();
+            let boxed = w
+                .shapes
+                .iter_mut()
+                .find(|s| s.bounds.height() > 20.0)
+                .unwrap();
+            boxed.shape_type = nc_core::ShapeType::Card;
+            boxed.label = label.into();
+            let svg = wireframe_svg(&w, Some([0.0, 0.0, 0.0, 1.0]), false).unwrap();
+            let png = tiny_skia::Pixmap::decode_png(&png(&svg, 2.0).unwrap()).unwrap();
+            let lit = png.pixels().iter().filter(|p| p.green() > 100).count();
+            (svg, lit)
+        };
+        let (svg, with) = render("Sign <in>");
+        assert!(svg.contains(">Sign &lt;in&gt;</text>"), "{svg}");
+        let (_, without) = render("");
+        assert!(
+            with > without + 50,
+            "label glyphs drawn: {with} vs {without} lit px"
+        );
+        assert!(pdf(&svg).unwrap().starts_with(b"%PDF-"));
+    }
+
+    /// A sketch far larger than the cap still exports, at the scale that fits.
+    #[test]
+    fn huge_sketches_render_within_the_raster_cap() {
+        let mut s = Stroke::new(Vec2::new(0.0, 0.0), 4.0, [1.0; 4]);
+        s.push(Vec2::new(12_000.0, 3_000.0));
+        let svg = svg(
+            &[Arc::new(Element::stroke(s))],
+            Some([0.0, 0.0, 0.0, 1.0]),
+            false,
+        )
+        .unwrap();
+        let png = tiny_skia::Pixmap::decode_png(&png(&svg, 2.0).unwrap()).unwrap();
+        assert!(
+            png.width() <= MAX_RASTER_PX as u32 && png.width() > 8000,
+            "{}",
+            png.width()
         );
     }
 }

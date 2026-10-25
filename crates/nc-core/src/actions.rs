@@ -35,6 +35,13 @@ pub enum Action {
     Export {
         wireframe: bool,
     },
+    ZoomToSelection,
+    ZoomIn,
+    ZoomOut,
+    ToggleSidebar,
+    ToggleInspector,
+    Preferences,
+    Shortcuts,
 }
 
 /// A key, independent of the windowing library. Characters are unshifted and lowercase.
@@ -77,6 +84,15 @@ impl Shortcut {
             (false, false, Key::Char('[')) => Some(Action::WireframeOpacity { up: false }),
             (false, false, Key::Char(']')) => Some(Action::WireframeOpacity { up: true }),
             (false, false, Key::Char('u')) => Some(Action::ReviewUncertain),
+            (true, false, Key::Char('2')) => Some(Action::ZoomToSelection),
+            // `=` is `+` without Shift on most layouts; take both.
+            (true, _, Key::Char('=' | '+')) => Some(Action::ZoomIn),
+            (true, false, Key::Char('-')) => Some(Action::ZoomOut),
+            (true, false, Key::Char('b')) => Some(Action::ToggleSidebar),
+            (true, false, Key::Char('i')) => Some(Action::ToggleInspector),
+            (true, false, Key::Char(',')) => Some(Action::Preferences),
+            // `?` is Shift+/ on most layouts.
+            (_, true, Key::Char('/' | '?')) | (_, _, Key::Char('?')) => Some(Action::Shortcuts),
             (false, false, Key::Delete | Key::Backspace) => Some(Action::Delete),
             (false, false, Key::Escape) => Some(Action::Deselect),
             (false, _, Key::Left) => nudge(-step, 0),
@@ -93,9 +109,12 @@ impl Action {
         match self {
             Self::Undo => history.undo_label().is_some(),
             Self::Redo => history.redo_label().is_some(),
-            Self::Deselect | Self::Delete | Self::Duplicate | Self::Copy | Self::Nudge { .. } => {
-                has_selection
-            }
+            Self::Deselect
+            | Self::Delete
+            | Self::Duplicate
+            | Self::Copy
+            | Self::Nudge { .. }
+            | Self::ZoomToSelection => has_selection,
             Self::FitToContent
             | Self::ActualSize
             | Self::SelectAll
@@ -104,7 +123,13 @@ impl Action {
             | Self::WireframeOpacity { .. }
             | Self::SideBySide
             | Self::ReviewUncertain
-            | Self::Export { .. } => true,
+            | Self::Export { .. }
+            | Self::ZoomIn
+            | Self::ZoomOut
+            | Self::ToggleSidebar
+            | Self::ToggleInspector
+            | Self::Preferences
+            | Self::Shortcuts => true,
         }
     }
 
@@ -146,6 +171,13 @@ impl Action {
             Self::ReviewUncertain => "Review Uncertain Items".into(),
             Self::Export { wireframe: false } => "Export Sketch".into(),
             Self::Export { wireframe: true } => "Export Wireframe".into(),
+            Self::ZoomToSelection => "Zoom to Selection".into(),
+            Self::ZoomIn => "Zoom In".into(),
+            Self::ZoomOut => "Zoom Out".into(),
+            Self::ToggleSidebar => "Sketches".into(),
+            Self::ToggleInspector => "Inspector".into(),
+            Self::Preferences => "Preferences".into(),
+            Self::Shortcuts => "Keyboard Shortcuts".into(),
         }
     }
 
@@ -169,6 +201,13 @@ impl Action {
             Self::ReviewUncertain => "U",
             Self::Export { wireframe: false } => "Ctrl+E",
             Self::Export { wireframe: true } => "Ctrl+Shift+E",
+            Self::ZoomToSelection => "Ctrl+2",
+            Self::ZoomIn => "Ctrl+=",
+            Self::ZoomOut => "Ctrl+-",
+            Self::ToggleSidebar => "Ctrl+B",
+            Self::ToggleInspector => "Ctrl+I",
+            Self::Preferences => "Ctrl+,",
+            Self::Shortcuts => "?",
         }
     }
 }
@@ -219,6 +258,15 @@ mod tests {
             Some(Action::Export { wireframe: false })
         );
         assert_eq!(key(false, false, 'e'), None, "plain E is the eraser");
+        assert_eq!(key(true, false, '2'), Some(Action::ZoomToSelection));
+        assert_eq!(key(true, false, '='), Some(Action::ZoomIn));
+        assert_eq!(key(true, true, '+'), Some(Action::ZoomIn));
+        assert_eq!(key(true, false, '-'), Some(Action::ZoomOut));
+        assert_eq!(key(true, false, 'b'), Some(Action::ToggleSidebar));
+        assert_eq!(key(true, false, 'i'), Some(Action::ToggleInspector));
+        assert_eq!(key(true, false, ','), Some(Action::Preferences));
+        assert_eq!(key(false, true, '/'), Some(Action::Shortcuts));
+        assert_eq!(key(true, true, '/'), Some(Action::Shortcuts), "Ctrl+? too");
         let named = |shift, key| {
             Shortcut {
                 ctrl: false,

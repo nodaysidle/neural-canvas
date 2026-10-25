@@ -53,7 +53,8 @@ fn main() {
                     Some("auto") => Latch::Adaptive,
                     _ => Latch::Fixed(std::time::Duration::from_secs_f64(secs(4, 0.0) / 1e3)),
                 },
-                recognize: arg(5) == Some("recognize"),
+                recognize: args[5.min(args.len())..].iter().any(|a| a == "recognize"),
+                shell: args[5.min(args.len())..].iter().any(|a| a == "shell"),
             });
         }
         Some("recognize") => {
@@ -111,6 +112,7 @@ fn main() {
             secs: secs(1, 15.0),
             latch: Latch::Fixed(std::time::Duration::ZERO),
             recognize: false,
+            shell: false,
         }),
         _ => usage(),
     }
@@ -118,7 +120,7 @@ fn main() {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: nc-bench offscreen [frames]\n       nc-bench window <panzoom|draw|move|input> <fifo|mailbox|immediate> [secs] [auto|late_ms] [recognize]\n       nc-bench tablet [secs]\n       nc-bench drive <secs> [hz] [strokes] | script < commands\n       nc-bench fixtures <pages | script SEED PAGE X Y MANIFEST | extract MANIFEST DB DIR>\n       nc-bench recognize\n       nc-bench samples\n       nc-bench store [dir]"
+        "usage: nc-bench offscreen [frames]\n       nc-bench window <panzoom|draw|move|input> <fifo|mailbox|immediate> [secs] [auto|late_ms] [recognize] [shell]\n       nc-bench tablet [secs]\n       nc-bench drive <secs> [hz] [strokes] | script < commands\n       nc-bench fixtures <pages | script SEED PAGE X Y MANIFEST | extract MANIFEST DB DIR>\n       nc-bench recognize\n       nc-bench samples\n       nc-bench store [dir]"
     );
     std::process::exit(2);
 }

@@ -44,14 +44,16 @@ const MIGRATIONS: &[Migration] = &[
 ",
     ),
     Migration::Code(add_stroke_pressure),
+    Migration::Code(add_recognized_label),
 ];
 
 /// Element encodings as they were stored by older schema versions, frozen. When `ElementKind`'s
 /// encoding changes again, copy the current types here as the next version first.
 mod format {
     pub mod v1 {
+        use super::v2::RecognizedShape;
         use glam::Vec2;
-        use nc_core::{RecognizedShape, Shape};
+        use nc_core::Shape;
         use serde::{Deserialize, Serialize};
 
         #[derive(Serialize, Deserialize)]
@@ -68,10 +70,45 @@ mod format {
             pub color: [f32; 4],
         }
     }
+
+    /// v2: strokes with pressure; recognised shapes without a label. `Shape`, `ShapeKind` and
+    /// `ShapeType` are shared with the current types: they have not changed and only ever append.
+    pub mod v2 {
+        use glam::Vec2;
+        use nc_core::{ElementId, Shape, ShapeType};
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize)]
+        pub enum ElementKind {
+            Stroke(Stroke),
+            Shape(Shape),
+            Recognized(RecognizedShape),
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct Stroke {
+            pub points: Vec<Vec2>,
+            pub width: f32,
+            pub color: [f32; 4],
+            pub pressure: Vec<f32>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct RecognizedShape {
+            pub shape_type: ShapeType,
+            pub min: Vec2,
+            pub max: Vec2,
+            pub confidence: f32,
+            pub sources: Vec<ElementId>,
+        }
+    }
 }
 
-/// v1 → v2: strokes gained a per-point pressure track (empty for every stroke stored before).
-fn add_stroke_pressure(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+/// Rewrites every element blob through `upgrade`, decoding the old encoding as `Old`.
+fn rewrite_elements<Old: serde::de::DeserializeOwned, New: serde::Serialize>(
+    tx: &rusqlite::Transaction<'_>,
+    upgrade: impl Fn(Old) -> New,
+) -> Result<()> {
     let rows: Vec<(Uuid, Uuid, Vec<u8>)> = tx
         .prepare("SELECT sketch_id, id, data FROM elements")?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -79,29 +116,68 @@ fn add_stroke_pressure(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     let mut update =
         tx.prepare("UPDATE elements SET data = ?3 WHERE sketch_id = ?1 AND id = ?2")?;
     for (sketch, id, data) in rows {
-        let old: format::v1::ElementKind =
-            postcard::from_bytes(&data).map_err(|e| StoreError::Corrupt {
-                sketch,
-                element: id,
-                reason: e.to_string(),
-            })?;
-        let new = match old {
-            format::v1::ElementKind::Stroke(s) => ElementKind::Stroke(nc_core::Stroke {
-                points: s.points,
-                width: s.width,
-                color: s.color,
-                pressure: Vec::new(),
-            }),
-            format::v1::ElementKind::Shape(s) => ElementKind::Shape(s),
-            format::v1::ElementKind::Recognized(r) => ElementKind::Recognized(r),
-        };
-        let data = postcard::to_stdvec(&new).expect("element kinds always encode");
+        let old: Old = postcard::from_bytes(&data).map_err(|e| StoreError::Corrupt {
+            sketch,
+            element: id,
+            reason: e.to_string(),
+        })?;
+        let data = postcard::to_stdvec(&upgrade(old)).expect("element kinds always encode");
         update.execute(params![sketch, id, data])?;
     }
     Ok(())
 }
 
+/// v2 → v3: recognised shapes gained a label (empty for every one stored before).
+fn add_recognized_label(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    use format::v2;
+    rewrite_elements(tx, |old: v2::ElementKind| match old {
+        v2::ElementKind::Stroke(s) => ElementKind::Stroke(nc_core::Stroke {
+            points: s.points,
+            width: s.width,
+            color: s.color,
+            pressure: s.pressure,
+        }),
+        v2::ElementKind::Shape(s) => ElementKind::Shape(s),
+        v2::ElementKind::Recognized(r) => ElementKind::Recognized(nc_core::RecognizedShape {
+            shape_type: r.shape_type,
+            min: r.min,
+            max: r.max,
+            confidence: r.confidence,
+            sources: r.sources,
+            label: String::new(),
+        }),
+    })
+}
+
+/// v1 → v2: strokes gained a per-point pressure track (empty for every stroke stored before).
+fn add_stroke_pressure(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    use format::{v1, v2};
+    rewrite_elements(tx, |old: v1::ElementKind| match old {
+        v1::ElementKind::Stroke(s) => v2::ElementKind::Stroke(v2::Stroke {
+            points: s.points,
+            width: s.width,
+            color: s.color,
+            pressure: Vec::new(),
+        }),
+        v1::ElementKind::Shape(s) => v2::ElementKind::Shape(s),
+        v1::ElementKind::Recognized(r) => v2::ElementKind::Recognized(r),
+    })
+}
+
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub sketches: Vec<SketchInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SketchInfo {
+    pub id: Uuid,
+    pub name: String,
+}
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -216,6 +292,57 @@ impl Db {
         Ok(id)
     }
 
+    /// Every project with its sketches, for the sidebar: projects oldest first, sketches most
+    /// recently edited first.
+    pub fn projects(&mut self) -> Result<Vec<ProjectInfo>> {
+        let mut projects: Vec<ProjectInfo> = self
+            .conn
+            .prepare("SELECT id, name FROM projects ORDER BY created_at, name")?
+            .query_map([], |r| {
+                Ok(ProjectInfo {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    sketches: Vec::new(),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, name FROM sketches ORDER BY updated_at DESC, created_at DESC",
+        )?;
+        let sketches = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Uuid>(1)?,
+                SketchInfo {
+                    id: r.get(0)?,
+                    name: r.get(2)?,
+                },
+            ))
+        })?;
+        for row in sketches {
+            let (project, sketch) = row?;
+            if let Some(p) = projects.iter_mut().find(|p| p.id == project) {
+                p.sketches.push(sketch);
+            }
+        }
+        Ok(projects)
+    }
+
+    pub fn rename_project(&mut self, id: Uuid, name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE projects SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_sketch(&mut self, id: Uuid, name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sketches SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        Ok(())
+    }
+
     pub fn create_sketch(&mut self, project: Uuid, name: &str) -> Result<Uuid> {
         let id = Uuid::new_v4();
         let now = now_ms();
@@ -249,6 +376,24 @@ impl Db {
     /// Loads a sketch. An empty sketch is an empty document; an unreadable row is an error, never a
     /// partial or stale document (Mac bug #3).
     pub fn load(&mut self, sketch: Uuid) -> Result<Document> {
+        let elements = self.rows(sketch, true)?;
+        let saved = elements
+            .iter()
+            .enumerate()
+            .map(|(z, e)| (e.id, (z, e.clone())))
+            .collect();
+        self.saved.insert(sketch, saved);
+        Ok(Document::from_elements(elements))
+    }
+
+    /// What can still be read of a damaged sketch, for showing it read-only (Mac bug #3): rows that
+    /// don't decode are left out. Nothing is recorded as saved, so this is never a base for saving.
+    pub fn load_readable(&mut self, sketch: Uuid) -> Result<Document> {
+        Ok(Document::from_elements(self.rows(sketch, false)?))
+    }
+
+    /// The sketch's elements in z order. `strict`: an undecodable row is an error, else skipped.
+    fn rows(&mut self, sketch: Uuid, strict: bool) -> Result<Vec<Arc<Element>>> {
         let exists = self
             .conn
             .query_row("SELECT 1 FROM sketches WHERE id = ?1", [sketch], |_| Ok(()))
@@ -266,21 +411,19 @@ impl Db {
         let mut elements = Vec::new();
         for row in rows {
             let (id, data) = row?;
-            let kind: ElementKind =
-                postcard::from_bytes(&data).map_err(|e| StoreError::Corrupt {
-                    sketch,
-                    element: id,
-                    reason: e.to_string(),
-                })?;
-            elements.push(Arc::new(Element { id, kind }));
+            match postcard::from_bytes::<ElementKind>(&data) {
+                Ok(kind) => elements.push(Arc::new(Element { id, kind })),
+                Err(e) if strict => {
+                    return Err(StoreError::Corrupt {
+                        sketch,
+                        element: id,
+                        reason: e.to_string(),
+                    });
+                }
+                Err(_) => {}
+            }
         }
-        let saved = elements
-            .iter()
-            .enumerate()
-            .map(|(z, e)| (e.id, (z, e.clone())))
-            .collect();
-        self.saved.insert(sketch, saved);
-        Ok(Document::from_elements(elements))
+        Ok(elements)
     }
 
     /// Writes `elements` as the sketch's content in one transaction, touching only rows that changed.
@@ -452,6 +595,76 @@ mod tests {
         assert_eq!(s.points, [Vec2::ZERO, Vec2::new(3.0, 4.0)]);
         assert_eq!((s.width, s.color), (2.5, [0.1, 0.2, 0.3, 1.0]));
         assert!(s.pressure.is_empty());
+    }
+
+    /// A v2 database (recognised shapes without a label) opens with every label empty.
+    #[test]
+    fn migrates_v2_recognized_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nc.db");
+        let (sketch, id, source) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        {
+            let mut db = Db::open(&path).unwrap();
+            let project = db.create_project("P").unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO sketches (id, project_id, name, created_at, updated_at) VALUES (?1, ?2, 'S', 0, 0)",
+                    params![sketch, project],
+                )
+                .unwrap();
+            let blob = postcard::to_stdvec(&format::v2::ElementKind::Recognized(
+                format::v2::RecognizedShape {
+                    shape_type: nc_core::ShapeType::Button,
+                    min: Vec2::ZERO,
+                    max: Vec2::new(120.0, 40.0),
+                    confidence: 0.8,
+                    sources: vec![source],
+                },
+            ))
+            .unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO elements VALUES (?1, ?2, 0, ?3)",
+                    params![sketch, id, blob],
+                )
+                .unwrap();
+            db.conn.pragma_update(None, "user_version", 2).unwrap();
+        }
+        let mut db = Db::open(&path).unwrap();
+        let doc = db.load(sketch).unwrap();
+        let ElementKind::Recognized(r) = &doc.elements()[0].kind else {
+            panic!("expected a recognised shape");
+        };
+        assert_eq!(
+            (r.shape_type, r.sources.as_slice()),
+            (nc_core::ShapeType::Button, &[source][..])
+        );
+        assert_eq!(r.label, "");
+    }
+
+    #[test]
+    fn projects_list_sketches_newest_first_and_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(&dir.path().join("nc.db")).unwrap();
+        let first = db.last_or_new_sketch().unwrap();
+        let project = db.projects().unwrap()[0].id;
+        let second = db.create_sketch(project, "Second").unwrap();
+        let other = db.create_project("Other").unwrap();
+        db.rename_sketch(first, "Login screen").unwrap();
+        db.rename_project(other, "Settings flow").unwrap();
+        // Saving makes a sketch the most recently edited (timestamps are ms: step past the creates).
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        db.save(first, 1, &[]).unwrap();
+        let projects = db.projects().unwrap();
+        let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["My Project", "Settings flow"]);
+        let sketches: Vec<_> = projects[0]
+            .sketches
+            .iter()
+            .map(|s| (s.id, s.name.as_str()))
+            .collect();
+        assert_eq!(sketches, [(first, "Login screen"), (second, "Second")]);
+        assert!(projects[1].sketches.is_empty());
     }
 
     #[test]

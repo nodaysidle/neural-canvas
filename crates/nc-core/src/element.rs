@@ -229,7 +229,7 @@ impl Shape {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ShapeKind {
     Rectangle,
     Ellipse,
@@ -246,6 +246,8 @@ pub struct RecognizedShape {
     pub confidence: f32,
     /// The strokes this element was recognised from.
     pub sources: Vec<ElementId>,
+    /// Text the user gave it in the inspector (a button's caption); empty for none.
+    pub label: String,
 }
 
 /// The Swift app's `ShapeType`, all 15 cases with their names. Append only, never reorder: stored blobs

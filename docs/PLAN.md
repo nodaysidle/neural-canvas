@@ -108,6 +108,29 @@ Export choice: Claude used cairo (a GTK dependency we no longer have); Gemini us
 Merged: **write SVG ourselves (single source of truth), PDF via `svg2pdf`, PNG via `resvg` or our own
 offscreen wgpu renderer, JPEG via `image`.**
 
+### Phase 5 decisions (2026-10-25, [`reports/phase-5.md`](reports/phase-5.md))
+
+- **Shell:** own wgpu chrome layer on raw winit (iced 0.14 still pins wgpu 27). `nc-shell` is pure
+  layout: it emits a `UiScene` (rects, images, text) and `Region`s, which drive hit-testing, Tab order
+  and the AccessKit tree. Text is glyphon 0.12. Fonts are Manrope (static instances cut from the
+  variable font) and DM Mono, bundled, SIL OFL. The visual rules are in `DESIGN.md`: no shadows (1 px
+  border), one accent, amber and red for state only.
+- **Light theme:** ink lightness is inverted in the shader with hue kept (`c + 1 − 2Y`, its own
+  inverse). Wireframe and chrome are not inverted; they use their own light colours. Exports follow
+  the canvas theme.
+- **Wireframe edits:** a type or label edited in the inspector is stored as a pinned
+  `RecognizedShape` element that overrides recognition for its source strokes (confidence 1).
+  Store schema v3 adds labels.
+- **Accessibility:** AccessKit (`accesskit_winit` 0.34) to AT-SPI; the window is created hidden so the
+  adapter exists before it is first shown.
+- **Store failure (bug #4):** no exit and no fallback. The app opens on an empty, read-only canvas
+  under a blocking Retry / Choose location / Quit dialog. Retries run on a worker. A chosen folder
+  (XDG file chooser portal via `ashpd`) is remembered in `settings.json`.
+- **Damaged sketch (bug #3):** opens read-only with every row that still decodes (`Db::load_readable`).
+- **Preferences:** `$XDG_CONFIG_HOME/neuralcanvas/settings.json`, written atomically on a worker:
+  theme, grid, smoothing, pressure curve, sidebar and inspector open state, store folder.
+- **Raster export cap:** 8,192 px on the long side.
+
 ## 2. Architecture
 
 ```
@@ -119,14 +142,16 @@ crates/
                tile cache above 600k visible segments), live stroke fast path, wireframe overlay, selection chrome.
   nc-store/    rusqlite WAL; store thread, 300 ms debounce, flush on switch/close/SIGTERM.
   nc-export/   SVG writer, svg2pdf, PNG, JPEG; raw sketch AND wireframe export.
-  nc-app/      `neuralcanvas` binary: window, input routing, actions/shortcuts, shell (own wgpu chrome).
+  nc-shell/    shell layout (no GPU, no window): bar, palette, sidebar, inspector, toasts, dialogs, copy,
+               palette + WCAG check; emits a UiScene and hit/focus/accessibility regions.
+  nc-app/      `neuralcanvas` binary: window, input routing, actions/shortcuts, shell state, AccessKit.
   nc-wayland/  side channel on winit's wl_display: presentation feedback, tablet-v2 tool input.
   nc-bench/    measurement harness (S2k runs, `wp_presentation` timing, virtual-pointer input latency,
                tablet probe, save cost). Never packaged.
   spike-iced/  Phase 0 iced 0.14 host spike, kept as the rerun harness for the shell decision.
 packaging/     PKGBUILD, PKGBUILD-bin, .desktop, metainfo.xml, icons, AppImage recipe.
 ```
-Present after Phase 4: `nc-core` (with `recognize`), `nc-render`, `nc-store`, `nc-export` (SVG, PDF, PNG, JPEG; raw and wireframe), `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`.
+Present after Phase 5: `nc-core` (with `recognize`), `nc-render` (canvas + UI pass), `nc-store`, `nc-export` (SVG, PDF, PNG, JPEG; raw and wireframe), `nc-shell`, `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`.
 
 **Coordinates (one convention, everywhere):** world space is y-down, origin top-left, 1 unit = 1 logical px
 at 100%. `screen = world * scale + offset`. Matches Wayland, SVG, PDF and PNG; the only flip is world→clip in

@@ -9,12 +9,23 @@ struct View {
     lift_abcd: vec4f,  // affine for lifted segments (a selection being moved), kurbo coefficient order
     lift_ef: vec2f,
     alpha: vec2f,      // opacity of the raw sketch and of the wireframe
+    background: vec4f, // linear RGB, w = 1 for the light theme
+    grid: vec4f,       // grid line colour, w = 1 to draw the grid
+}
+
+// Light theme: lightness inverted, hue kept (nc_core::theme::ink_on_light). In sRGB: c + 1 - 2Y.
+fn ink_on_light(c: vec3f) -> vec3f {
+    let s = select(1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055, c * 12.92, c <= vec3f(0.0031308));
+    let y = dot(s, vec3f(0.299, 0.587, 0.114));
+    let t = clamp(s + vec3f(1.0 - 2.0 * y), vec3f(0.0), vec3f(1.0));
+    return select(pow((t + 0.055) / 1.055, vec3f(2.4)), t / 12.92, t <= vec3f(0.04045));
 }
 
 // SegmentInstance.flags
 const LIFTED: u32 = 1u;
 const WIRE: u32 = 2u;
 const CHROME: u32 = 4u;
+const INK_ON_TOP: u32 = 8u;
 
 fn lift(p: vec2f) -> vec2f {
     let m = view.lift_abcd;
@@ -46,9 +57,9 @@ fn grid_line(world: vec2f, spacing: f32) -> f32 {
     let fade = 1.0 - fract(level);                // minor lines fade out as they get dense
     let minor = grid_line(world, spacing) * mix(0.25, 1.0, fade);
     let major = grid_line(world, spacing * 4.0);
-    let bg = vec3f(0.012, 0.013, 0.018);
-    let ink = vec3f(0.035, 0.038, 0.05);
-    return vec4f(mix(bg, ink, max(minor * 0.5, major)), 1.0);
+    let bg = view.background.rgb;
+    let ink = view.grid.rgb;
+    return vec4f(mix(bg, ink, max(minor * 0.5, major) * view.grid.w), 1.0);
 }
 
 // ---- strokes: one instanced quad per segment, shaded as an SDF capsule (round caps and joins, AA at any angle) ----
@@ -100,10 +111,15 @@ struct SegOut {
     var layer = view.alpha.x;
     if (s.flags & WIRE) != 0u {
         layer = view.alpha.y;
-    } else if (s.flags & CHROME) != 0u {
+    } else if (s.flags & (CHROME | INK_ON_TOP)) != 0u {
         layer = 1.0;
     }
-    o.color = vec4f(s.color.rgb, s.color.a * layer);
+    // Only ink inverts on the light canvas; the wireframe and chrome come in theme colours.
+    var rgb = s.color.rgb;
+    if view.background.w > 0.5 && (s.flags & (WIRE | CHROME)) == 0u {
+        rgb = ink_on_light(rgb);
+    }
+    o.color = vec4f(rgb, s.color.a * layer);
     return o;
 }
 

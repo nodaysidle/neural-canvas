@@ -10,10 +10,11 @@ mod geometry;
 mod primitive;
 pub mod swift;
 
-use crate::element::{Element, ElementId, ElementKind, ShapeType, Stroke};
+use crate::element::{Element, ElementId, ElementKind, RecognizedShape, ShapeType, Stroke};
 use glam::Vec2;
 use kurbo::Rect;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// One recognised wireframe element.
@@ -29,6 +30,20 @@ pub struct Recognized {
     pub ends: Option<[Vec2; 2]>,
     /// The elements it was recognised from.
     pub sources: Vec<ElementId>,
+    /// Text the user gave it (a button's caption).
+    pub label: String,
+    /// Set when the user edited it: the document element that holds the edit.
+    pub pinned: Option<ElementId>,
+}
+
+/// Corner radius a UI element is drawn with (the Swift app's values).
+fn default_radius(t: ShapeType) -> Option<f32> {
+    match t {
+        ShapeType::Button => Some(8.0),
+        ShapeType::InputField | ShapeType::RoundedRectangle => Some(6.0),
+        ShapeType::Card | ShapeType::Container => Some(12.0),
+        _ => None,
+    }
 }
 
 impl Recognized {
@@ -40,6 +55,21 @@ impl Recognized {
             corner_radius: None,
             ends: None,
             sources,
+            label: String::new(),
+            pinned: None,
+        }
+    }
+
+    /// The document element that stores a user's edit of this one (its type, label and bounds).
+    pub fn to_pinned(&self) -> RecognizedShape {
+        let v = |x: f64, y: f64| Vec2::new(x as f32, y as f32);
+        RecognizedShape {
+            shape_type: self.shape_type,
+            min: v(self.bounds.x0, self.bounds.y0),
+            max: v(self.bounds.x1, self.bounds.y1),
+            confidence: 1.0,
+            sources: self.sources.clone(),
+            label: self.label.clone(),
         }
     }
 
@@ -163,9 +193,41 @@ impl Fixture {
     }
 }
 
-/// Recognises every stroke and shape in `elements` (in z-order) as one wireframe.
+/// Recognises every stroke and shape in `elements` (in z-order) as one wireframe. Elements the user
+/// edited (stored as `Recognized` elements) win: they are used as they are, and the strokes they came
+/// from are not recognised again.
 pub fn recognize(elements: &[Arc<Element>]) -> Wireframe {
-    let shapes = compose::recognize(elements);
+    let pinned: Vec<(ElementId, &RecognizedShape)> = elements
+        .iter()
+        .filter_map(|e| match &e.kind {
+            ElementKind::Recognized(r) => Some((e.id, r)),
+            _ => None,
+        })
+        .collect();
+    let covered: HashSet<ElementId> = pinned
+        .iter()
+        .flat_map(|(_, r)| r.sources.iter().copied())
+        .collect();
+    let free: Vec<Arc<Element>> = elements
+        .iter()
+        .filter(|e| !covered.contains(&e.id))
+        .cloned()
+        .collect();
+    let mut shapes = compose::recognize(&free);
+    shapes.extend(pinned.into_iter().map(|(id, r)| {
+        let bounds = Rect::new(
+            r.min.x as f64,
+            r.min.y as f64,
+            r.max.x as f64,
+            r.max.y as f64,
+        );
+        Recognized {
+            corner_radius: default_radius(r.shape_type),
+            label: r.label.clone(),
+            pinned: Some(id),
+            ..Recognized::new(r.shape_type, bounds, r.confidence, r.sources.clone())
+        }
+    }));
     Wireframe {
         report: QualityReport::of(&shapes),
         shapes,
@@ -192,4 +254,54 @@ pub fn strokes(elements: &[Arc<Element>]) -> Vec<(ElementId, &Stroke)> {
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(a: Vec2, b: Vec2) -> Arc<Element> {
+        let mut s = Stroke::new(a, 2.0, [1.0; 4]);
+        s.push(b);
+        Arc::new(Element::stroke(s))
+    }
+
+    /// An edit pins an element: it replaces what recognition made of its strokes, keeps its label,
+    /// and is never second-guessed (confidence 1, not uncertain).
+    #[test]
+    fn pinned_edits_override_recognition() {
+        let divider = line(Vec2::new(0.0, 0.0), Vec2::new(200.0, 0.0));
+        let other = line(Vec2::new(0.0, 100.0), Vec2::new(50.0, 160.0));
+        let elements = vec![divider.clone(), other];
+        let before = recognize(&elements);
+        assert_eq!(before.shapes.len(), 2);
+        let mut edited = before
+            .shapes
+            .iter()
+            .find(|s| s.sources == [divider.id])
+            .unwrap()
+            .clone();
+        assert_eq!(edited.shape_type, ShapeType::Divider);
+        edited.shape_type = ShapeType::Text;
+        edited.label = "Section title".into();
+        let pin = Arc::new(Element::new(ElementKind::Recognized(edited.to_pinned())));
+        let mut with_pin = elements.clone();
+        with_pin.push(pin.clone());
+        let after = recognize(&with_pin);
+        assert_eq!(
+            after.shapes.len(),
+            2,
+            "the divider was not recognised again"
+        );
+        let shown = after
+            .shapes
+            .iter()
+            .find(|s| s.pinned == Some(pin.id))
+            .unwrap();
+        assert_eq!(
+            (shown.shape_type, shown.label.as_str()),
+            (ShapeType::Text, "Section title")
+        );
+        assert!(!shown.is_uncertain() && shown.confidence == 1.0);
+    }
 }

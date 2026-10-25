@@ -1,6 +1,8 @@
 //! GPU canvas renderer. Owns no window: it draws into any `TextureView`, so the same code serves the
 //! window surface, offscreen tests and PNG export.
 
+pub mod ui;
+
 use bytemuck::{Pod, Zeroable};
 use nc_core::document::{element_segments, stroke_segment_count, stroke_segments_from};
 use nc_core::kurbo::Affine;
@@ -23,6 +25,10 @@ struct ViewUniform {
     lift: [f32; 6],
     /// Opacity of the raw sketch and of the wireframe.
     alpha: [f32; 2],
+    /// Canvas background (linear RGB) and 1 for the light theme.
+    background: [f32; 4],
+    /// Grid line colour (linear RGB), and 1 to draw the grid.
+    grid: [f32; 4],
 }
 
 #[repr(C)]
@@ -65,6 +71,36 @@ const SEGMENT_ATTRS: [wgpu::VertexAttribute; 5] = [
     },
 ];
 
+/// The canvas's colours. Ink is stored as drawn on the dark canvas; the light theme shows it with its
+/// lightness inverted (`nc_core::theme::ink_on_light`, mirrored in the shader).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanvasTheme {
+    pub light: bool,
+    /// Linear RGB.
+    pub background: [f32; 3],
+    pub grid: [f32; 3],
+}
+
+impl CanvasTheme {
+    pub const DARK: Self = Self {
+        light: false,
+        background: [0.012, 0.013, 0.018],
+        grid: [0.035, 0.038, 0.05],
+    };
+    pub const LIGHT: Self = Self {
+        light: true,
+        background: [0.89, 0.89, 0.87],
+        grid: [0.74, 0.75, 0.76],
+    };
+
+    /// The background as RGBA, for exports that should look like the canvas.
+    pub fn background_rgba(&self) -> [f32; 4] {
+        let [r, g, b] = self.background;
+        [r, g, b, 1.0]
+    }
+}
+
+/// The dark canvas background, as a clear colour.
 pub const CLEAR: wgpu::Color = wgpu::Color {
     r: 0.012,
     g: 0.013,
@@ -84,8 +120,11 @@ pub struct LiveStroke<'a> {
 pub const LIFTED: u32 = 1;
 /// Part of the wireframe: drawn at the wireframe's opacity, not the sketch's.
 pub const WIRE: u32 = 2;
-/// The live stroke and the overlay: always fully opaque.
+/// Selection and other chrome: always opaque, colours used as given in both themes.
 pub const CHROME: u32 = 4;
+/// Ink drawn over everything (the live stroke, predicted ink, a shape being dragged): always opaque,
+/// lightness-inverted on the light canvas like all ink.
+pub const INK_ON_TOP: u32 = 8;
 
 /// How much of the raw sketch and of the wireframe to show, 0..=1 each.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -130,8 +169,13 @@ pub struct Scene<'a> {
     pub blend: Blend,
     /// Raw sketch on the left half, wireframe on the right, same view in each.
     pub split: bool,
-    /// World-space chrome and predicted ink, on top.
+    /// Ink drawn on top: predicted ink, a shape being dragged.
+    pub ink_overlay: &'a [Segment],
+    /// World-space chrome (selection, marquee, highlights), on top of everything.
     pub overlay: &'a [Segment],
+    pub theme: CanvasTheme,
+    /// Show the background grid (a preference).
+    pub grid: bool,
 }
 
 impl<'a> Scene<'a> {
@@ -143,7 +187,10 @@ impl<'a> Scene<'a> {
             wire: None,
             blend: Blend::RAW,
             split: false,
+            ink_overlay: &[],
             overlay: &[],
+            theme: CanvasTheme::DARK,
+            grid: true,
         }
     }
 }
@@ -517,7 +564,7 @@ impl Renderer {
         let from = self.live_len.saturating_sub(1).min(total);
         self.scratch.clear();
         self.scratch
-            .extend(stroke_segments_from(live.stroke, from as usize).map(flagged(CHROME)));
+            .extend(stroke_segments_from(live.stroke, from as usize).map(flagged(INK_ON_TOP)));
         if !self.scratch.is_empty() {
             queue.write_buffer(
                 &self.live,
@@ -529,13 +576,21 @@ impl Renderer {
         self.live_len = total;
     }
 
-    fn sync_overlay(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, overlay: &[Segment]) {
-        let n = overlay.len() as u32;
+    fn sync_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        ink: &[Segment],
+        overlay: &[Segment],
+    ) {
+        let n = (ink.len() + overlay.len()) as u32;
         if n > self.overlay_capacity {
             self.overlay_capacity = n.next_power_of_two();
             self.overlay = Self::instance_buffer(device, self.overlay_capacity);
         }
         self.scratch.clear();
+        self.scratch
+            .extend(ink.iter().copied().map(flagged(INK_ON_TOP)));
         self.scratch
             .extend(overlay.iter().copied().map(flagged(CHROME)));
         if n > 0 {
@@ -586,7 +641,7 @@ impl Renderer {
         let _span = tracy_client::span!("Renderer::render");
         self.sync(device, queue, scene.doc, scene.lifted.map(|l| l.ids));
         self.sync_live(device, queue, scene.live);
-        self.sync_overlay(device, queue, scene.overlay);
+        self.sync_overlay(device, queue, scene.ink_overlay, scene.overlay);
         self.sync_wire(device, queue, scene.wire);
         let lift = scene
             .lifted
@@ -612,6 +667,14 @@ impl Renderer {
                 origin: origin.map(|v| v * px_per_pt),
                 lift,
                 alpha: [blend.raw, blend.wire],
+                background: {
+                    let [r, g, b] = scene.theme.background;
+                    [r, g, b, scene.theme.light as u32 as f32]
+                },
+                grid: {
+                    let [r, g, b] = scene.theme.grid;
+                    [r, g, b, scene.grid as u32 as f32]
+                },
             };
             queue.write_buffer(&self.panes[i].0, 0, bytemuck::bytes_of(&u));
         }
@@ -623,7 +686,15 @@ impl Renderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(CLEAR),
+                    load: wgpu::LoadOp::Clear({
+                        let [r, g, b] = scene.theme.background;
+                        wgpu::Color {
+                            r: r as f64,
+                            g: g as f64,
+                            b: b as f64,
+                            a: 1.0,
+                        }
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
             })],

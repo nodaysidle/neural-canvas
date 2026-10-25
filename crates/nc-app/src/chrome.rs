@@ -5,11 +5,23 @@ use glam::Vec2;
 use nc_core::select::{HANDLE_RADIUS, Handle};
 use nc_core::{Rect, Segment, Viewport};
 
-/// The one accent colour (linear RGB).
-pub const ACCENT: [f32; 4] = [0.15, 0.42, 1.0, 1.0];
+/// The one accent colour (linear RGB), per theme (the light one is DESIGN.md's #1f5fd1).
+fn accent(dark: bool) -> [f32; 4] {
+    if dark {
+        [0.15, 0.42, 1.0, 1.0]
+    } else {
+        [0.0137, 0.1145, 0.637, 1.0]
+    }
+}
 const HANDLE_FILL: [f32; 4] = [0.92, 0.94, 1.0, 1.0];
-/// Quiet chrome: a little brighter than the grid's major lines.
-const DIVIDER: [f32; 4] = [0.08, 0.09, 0.12, 1.0];
+/// Quiet chrome: a little stronger than the grid's major lines.
+fn divider(dark: bool) -> [f32; 4] {
+    if dark {
+        [0.08, 0.09, 0.12, 1.0]
+    } else {
+        [0.6, 0.61, 0.63, 1.0]
+    }
+}
 /// Outline half width, logical px.
 const LINE: f32 = 0.6;
 
@@ -21,13 +33,19 @@ fn corners(r: Rect) -> [Vec2; 5] {
     [a, Vec2::new(b.x, a.y), b, Vec2::new(a.x, b.y), a]
 }
 
-pub fn polyline(out: &mut Vec<Segment>, points: &[Vec2], closed: bool, view: &Viewport) {
+pub fn polyline(
+    out: &mut Vec<Segment>,
+    points: &[Vec2],
+    closed: bool,
+    view: &Viewport,
+    dark: bool,
+) {
     let half_width = LINE / view.scale;
     let pair = |a: Vec2, b: Vec2| Segment {
         a,
         b,
         half_width,
-        color: ACCENT,
+        color: accent(dark),
     };
     out.extend(points.windows(2).map(|w| pair(w[0], w[1])));
     if closed && let (Some(&first), Some(&last)) = (points.first(), points.last()) {
@@ -35,12 +53,12 @@ pub fn polyline(out: &mut Vec<Segment>, points: &[Vec2], closed: bool, view: &Vi
     }
 }
 
-pub fn rect(out: &mut Vec<Segment>, r: Rect, view: &Viewport) {
-    polyline(out, &corners(r), false, view);
+pub fn rect(out: &mut Vec<Segment>, r: Rect, view: &Viewport, dark: bool) {
+    polyline(out, &corners(r), false, view, dark);
 }
 
 /// The element "Review uncertain items" is showing: a thicker amber box a little outside it.
-pub fn highlight(out: &mut Vec<Segment>, r: Rect, view: &Viewport) {
+pub fn highlight(out: &mut Vec<Segment>, r: Rect, view: &Viewport, dark: bool) {
     let pad = 6.0 / view.scale as f64;
     let half_width = 1.5 / view.scale;
     let c = corners(r.inflate(pad, pad));
@@ -48,12 +66,12 @@ pub fn highlight(out: &mut Vec<Segment>, r: Rect, view: &Viewport) {
         a: w[0],
         b: w[1],
         half_width,
-        color: nc_core::recognize::draw::UNCERTAIN,
+        color: nc_core::recognize::draw::color(!dark, true),
     }));
 }
 
 /// Side by side: a hairline down the left pane's right edge (the right pane clips it away).
-pub fn pane_divider(out: &mut Vec<Segment>, pane: Vec2, view: &Viewport) {
+pub fn pane_divider(out: &mut Vec<Segment>, pane: Vec2, view: &Viewport, dark: bool) {
     let x = view.screen_to_world(Vec2::new(pane.x, 0.0)).x;
     let (top, bottom) = (
         view.screen_to_world(Vec2::ZERO).y,
@@ -63,16 +81,19 @@ pub fn pane_divider(out: &mut Vec<Segment>, pane: Vec2, view: &Viewport) {
         a: Vec2::new(x, top),
         b: Vec2::new(x, bottom),
         half_width: 1.0 / view.scale,
-        color: DIVIDER,
+        color: divider(dark),
     });
 }
 
 /// The selection box with its eight handles (accent ring, light centre).
-pub fn selection(out: &mut Vec<Segment>, bounds: Rect, view: &Viewport) {
-    rect(out, bounds, view);
+pub fn selection(out: &mut Vec<Segment>, bounds: Rect, view: &Viewport, dark: bool) {
+    rect(out, bounds, view, dark);
     for h in Handle::ALL {
         let at = h.position(bounds);
-        for (radius, color) in [(HANDLE_RADIUS, ACCENT), (HANDLE_RADIUS - 1.5, HANDLE_FILL)] {
+        for (radius, color) in [
+            (HANDLE_RADIUS, accent(dark)),
+            (HANDLE_RADIUS - 1.5, HANDLE_FILL),
+        ] {
             out.push(Segment {
                 a: at,
                 b: at,
@@ -116,7 +137,7 @@ mod tests {
             scale: 4.0,
         };
         let mut out = Vec::new();
-        selection(&mut out, Rect::new(0.0, 0.0, 10.0, 10.0), &view);
+        selection(&mut out, Rect::new(0.0, 0.0, 10.0, 10.0), &view, true);
         let outer = out.iter().map(|s| s.half_width).fold(0.0, f32::max);
         assert_eq!(outer * view.scale * 2.0, 8.0);
         assert_eq!(out.len(), 4 + 16);
