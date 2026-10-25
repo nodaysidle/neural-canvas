@@ -1,0 +1,59 @@
+# Maintainer: nodaysidle
+# Built from the release source tarball. `packaging/release.sh` writes the checksum below.
+pkgname=neuralcanvas
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Sketch interface layouts and turn them into wireframes'
+arch=('x86_64')
+url='https://github.com/nodaysidle'
+# The app is MIT; the Manrope and DM Mono fonts built into it are OFL-1.1.
+license=('MIT' 'OFL-1.1')
+# Loaded at run time (dlopen), so namcap can't see them: Wayland, xkbcommon and the Vulkan loader.
+depends=('glibc' 'hicolor-icon-theme' 'libgcc' 'libxkbcommon' 'vulkan-icd-loader' 'wayland')
+makedepends=('cargo')
+optdepends=('vulkan-driver: GPU rendering (vulkan-intel, vulkan-radeon or nvidia-utils)'
+            'xdg-desktop-portal: choosing screenshots and the sketch folder'
+            'libx11: running under X11'
+            'libxcursor: running under X11'
+            'libxi: running under X11')
+# makepkg's -flto=auto makes the bundled SQLite C objects GCC LTO bitcode, which the Rust link can't
+# read; Cargo's own release profile does the LTO, and strips, so there is no debug package to split.
+options=('!lto' '!debug')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('c53477ee079b5e30c8502428f9310383a5d581ac4bcfdfc275263f2e42799a12')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p neuralcanvas
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # The headless crates; GPU tests skip themselves where no adapter exists.
+  cargo test --frozen -p nc-core -p nc-store -p nc-export -p nc-shell
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/neuralcanvas -t "$pkgdir/usr/bin"
+  install -Dm644 packaging/sh.nodaysidle.NeuralCanvas.desktop -t "$pkgdir/usr/share/applications"
+  install -Dm644 packaging/sh.nodaysidle.NeuralCanvas.metainfo.xml -t "$pkgdir/usr/share/metainfo"
+  install -Dm644 packaging/icons/sh.nodaysidle.NeuralCanvas.svg \
+    -t "$pkgdir/usr/share/icons/hicolor/scalable/apps"
+  for size in 16 32 48 64 128 256 512; do
+    install -Dm644 "packaging/icons/hicolor/${size}x${size}/apps/sh.nodaysidle.NeuralCanvas.png" \
+      -t "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps"
+  done
+  install -Dm644 LICENSE crates/nc-render/fonts/{Manrope,DMMono}-OFL.txt \
+    -t "$pkgdir/usr/share/licenses/$pkgname"
+}

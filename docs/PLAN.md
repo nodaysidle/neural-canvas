@@ -153,6 +153,24 @@ offscreen wgpu renderer, JPEG via `image`.**
 - **Threads:** decoding (`image`, PNG and JPEG only, 16384 px and 1 GiB limits) and extraction run on
   a `style` worker at `SCHED_IDLE`; the portal picker runs there too.
 
+### Phase 7 decisions (2026-10-25, [`reports/phase-7.md`](reports/phase-7.md))
+
+- **One binary for every artefact:** built from the source tarball in an ubuntu:24.04 container
+  (glibc 2.39), shared by the binary tarball, `neuralcanvas-bin` and the AppImage. The source
+  `PKGBUILD` builds its own with `options=('!lto' '!debug')` (makepkg's GCC LTO breaks the bundled
+  SQLite link; Cargo already strips).
+- **AppImage libraries:** the Vulkan loader and xkbcommon are bundled as a fallback that `AppRun`
+  uses only when the host lacks them. libwayland is not bundled, against the Phase 7 brief: the
+  host's Vulkan driver needs the host's libwayland (Ubuntu's 1.22 made Mesa on Arch fail to load:
+  `undefined symbol: wl_display_create_queue_with_name`).
+- **Dependencies declared by hand:** wayland, libxkbcommon and the Vulkan loader are loaded at run
+  time, so namcap can't see them and warns that they "may not be needed"; they are.
+- **Checks in containers:** `packaging/check-arch.sh` (makepkg, namcap, clean pacman install and run)
+  and `packaging/check-appimage.sh` (Ubuntu 24.04, Fedora 41), against the host's Wayland session.
+  `packaging/smoke.sh` drives the release flow and compares the store before and after a relaunch.
+- **Homepage:** `https://github.com/nodaysidle` until the repository's public name is settled (§9 q2).
+- **Licence:** `LICENSE` (MIT, as `Cargo.toml` declared); the bundled fonts' OFL texts ship next to it.
+
 ## 2. Architecture
 
 ```
@@ -173,7 +191,8 @@ crates/
   spike-iced/  Phase 0 iced 0.14 host spike, kept as the rerun harness for the shell decision.
 packaging/     PKGBUILD, PKGBUILD-bin, .desktop, metainfo.xml, icons, AppImage recipe.
 ```
-Present after Phase 6: `nc-core` (with `recognize` and `style`), `nc-render` (canvas + UI pass), `nc-store` (with style presets), `nc-export` (SVG, PDF, PNG, JPEG; raw and wireframe, plain or styled), `nc-shell`, `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`.
+Present after Phase 7: `packaging/` (desktop file, metainfo, icons, PKGBUILDs, AppImage recipe,
+release and check scripts). Present after Phase 6: `nc-core` (with `recognize` and `style`), `nc-render` (canvas + UI pass), `nc-store` (with style presets), `nc-export` (SVG, PDF, PNG, JPEG; raw and wireframe, plain or styled), `nc-shell`, `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`.
 
 **Coordinates (one convention, everywhere):** world space is y-down, origin top-left, 1 unit = 1 logical px
 at 100%. `screen = world * scale + offset`. Matches Wayland, SVG, PDF and PNG; the only flip is world→clip in
@@ -284,9 +303,10 @@ light/dark (Gemini's Catppuccin/Nord/OLED are post-v1 unless Alan pulls them in)
 
 App id `sh.nodaysidle.NeuralCanvas` (Wayland app_id, `.desktop`, icons, AppStream). Data in
 `$XDG_DATA_HOME/neuralcanvas/neuralcanvas.db`, config in `$XDG_CONFIG_HOME/neuralcanvas/`.
-AUR source + `-bin` packages (`depends=(vulkan-icd-loader wayland libxkbcommon)`), lint with `namcap`,
-build in a clean chroot. AppImage: no GTK to bundle, so binary + desktop file + icon with the host's Vulkan
-loader; build in an Ubuntu 24.04 container for glibc reach. Every artefact gets a `.sha256`
+AUR source + `-bin` packages (`depends=(vulkan-icd-loader wayland libxkbcommon hicolor-icon-theme)`),
+lint with `namcap`, build in a clean container. AppImage: no GTK to bundle, so binary + desktop file +
+icons, the Vulkan loader and xkbcommon only as a fallback, libwayland and the driver from the host;
+built in an Ubuntu 24.04 container for glibc reach (`packaging/release.sh`). Every artefact gets a `.sha256`
 ([`RELEASING.md`](RELEASING.md)). Release CI drafts the GitHub Release; a human publishes.
 
 ## 9. Open questions for Alan

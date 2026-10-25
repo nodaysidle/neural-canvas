@@ -1,0 +1,15 @@
+#!/bin/sh
+# NeuralCanvas AppImage entry. Wayland and the GPU driver always come from the host: a Vulkan driver is
+# built against the host's libwayland and fails to load with any other. The bundled Vulkan loader and
+# xkbcommon are a fallback, used only when the host has no copy of one of them.
+here="$(dirname "$(readlink -f "$0")")"
+known() {
+    for ldconfig in ldconfig /sbin/ldconfig /usr/sbin/ldconfig; do
+        "$ldconfig" -p 2>/dev/null | grep -qE "^[[:space:]]+$1 " && return 0
+    done
+    return 1
+}
+if ! known libvulkan.so.1 || ! known libxkbcommon.so.0; then
+    export LD_LIBRARY_PATH="$here/usr/lib/fallback${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+exec "$here/usr/bin/neuralcanvas" "$@"

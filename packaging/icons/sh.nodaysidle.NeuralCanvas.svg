@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- NeuralCanvas: a hand-drawn box becoming a clean wireframe card. Dark tile, the one accent (DESIGN.md). -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#17181d"/>
+  <rect x="8.5" y="8.5" width="239" height="239" rx="51.5" fill="none" stroke="#30333b"/>
+  <!-- The sketch: a pen stroke that doesn't quite close, left and top. -->
+  <path d="M 66 186 C 60 150, 62 108, 64 74 C 66 66, 72 62, 82 63 C 112 64, 150 61, 178 64"
+        fill="none" stroke="#e7e9ee" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- The wireframe it becomes: crisp edges, right and bottom, in the accent. -->
+  <path d="M 178 64 L 186 64 Q 194 64 194 72 L 194 184 Q 194 192 186 192 L 74 192 Q 66 192 66 186"
+        fill="none" stroke="#5e9dff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Its content: a text line and a button. -->
+  <rect x="90" y="96" width="76" height="12" rx="6" fill="#9ba1ad"/>
+  <rect x="90" y="140" width="76" height="28" rx="8" fill="#5e9dff"/>
+</svg>

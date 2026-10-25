@@ -38,6 +38,8 @@ crates/
   nc-bench/    measurement harness (S2k frame pacing, scanout latency, save cost). Never packaged.
   spike-iced/  Phase 0 iced host spike, kept to rerun the shell decision.
   nc-app/      `neuralcanvas` binary: winit window, wgpu surface, input → core → render.
+packaging/     desktop file, AppStream metainfo, icons, PKGBUILDs, AppImage recipe, release and
+               check scripts (docs/RELEASING.md).
 docs/
   PLAN.md               merged final plan (stack, architecture, bugs to design out, phases)
   UX-PRINCIPLES.md      what "polished" means here

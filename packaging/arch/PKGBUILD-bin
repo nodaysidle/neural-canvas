@@ -1,0 +1,26 @@
+# Maintainer: nodaysidle
+# Repackages the release binary tarball (built on Ubuntu 24.04, glibc 2.39). `packaging/release.sh`
+# writes the checksum below. As an AUR package this file is named PKGBUILD.
+pkgname=neuralcanvas-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Sketch interface layouts and turn them into wireframes (prebuilt)'
+arch=('x86_64')
+url='https://github.com/nodaysidle'
+license=('MIT' 'OFL-1.1')
+depends=('glibc' 'hicolor-icon-theme' 'libgcc' 'libxkbcommon' 'vulkan-icd-loader' 'wayland')
+optdepends=('vulkan-driver: GPU rendering (vulkan-intel, vulkan-radeon or nvidia-utils)'
+            'xdg-desktop-portal: choosing screenshots and the sketch folder'
+            'libx11: running under X11'
+            'libxcursor: running under X11'
+            'libxi: running under X11')
+provides=('neuralcanvas')
+conflicts=('neuralcanvas')
+options=('!strip' '!debug')
+source_x86_64=("neuralcanvas-$pkgver-$CARCH.tar.zst")
+sha256sums_x86_64=('9df0a19968458c3e3ffb5ee5a45e8f755d8d088dc771498dc5d758221b29b94d')
+
+package() {
+  cp -a "$srcdir/neuralcanvas-$pkgver/usr" "$pkgdir/"
+  mv "$pkgdir/usr/share/licenses/neuralcanvas" "$pkgdir/usr/share/licenses/$pkgname"
+}

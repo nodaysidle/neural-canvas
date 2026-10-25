@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>sh.nodaysidle.NeuralCanvas</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>NeuralCanvas</name>
+  <summary>Sketch interface layouts and turn them into wireframes</summary>
+  <developer id="sh.nodaysidle">
+    <name>nodaysidle</name>
+  </developer>
+  <description>
+    <p>
+      NeuralCanvas is a fast drawing canvas for people who think in boxes and arrows. Sketch a screen
+      freehand with a mouse or a pen tablet, and NeuralCanvas recognises buttons, fields, cards, text,
+      dividers, images and arrows, and shows them as a clean wireframe you can edit.
+    </p>
+    <ul>
+      <li>An infinite canvas that keeps up with the pen, with pan, pinch and zoom that stay under your hand</li>
+      <li>Recognition that marks what it is unsure of, with a way to review each uncertain item</li>
+      <li>Wireframe styles taken from a screenshot of a real app: colours, corners and spacing, checked for contrast</li>
+      <li>Export as SVG, PDF, PNG and JPEG</li>
+      <li>Projects and sketches saved as you draw, on your computer only: no account and no network</li>
+    </ul>
+  </description>
+  <!-- The developer's page until the Linux repository's public name is settled (docs/PLAN.md §9 q2). -->
+  <url type="homepage">https://github.com/nodaysidle</url>
+  <launchable type="desktop-id">sh.nodaysidle.NeuralCanvas.desktop</launchable>
+  <provides>
+    <binary>neuralcanvas</binary>
+  </provides>
+  <categories>
+    <category>Graphics</category>
+    <category>VectorGraphics</category>
+    <category>2DGraphics</category>
+  </categories>
+  <keywords>
+    <keyword>sketch</keyword>
+    <keyword>wireframe</keyword>
+    <keyword>mockup</keyword>
+  </keywords>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>tablet</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">640</display_length>
+  </requires>
+  <branding>
+    <color type="primary" scheme_preference="dark">#17181d</color>
+    <color type="primary" scheme_preference="light">#5e9dff</color>
+  </branding>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-25">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

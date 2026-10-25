@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=NeuralCanvas
+GenericName=Wireframe Sketcher
+Comment=Sketch interface layouts by hand and turn them into clean wireframes
+Exec=neuralcanvas
+Icon=sh.nodaysidle.NeuralCanvas
+Terminal=false
+Categories=Graphics;VectorGraphics;2DGraphics;
+Keywords=sketch;wireframe;mockup;interface;layout;drawing;
+StartupWMClass=sh.nodaysidle.NeuralCanvas
