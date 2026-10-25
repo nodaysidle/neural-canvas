@@ -6,6 +6,6 @@
 == close, then check the store
 projects|elements|styled sketches|presets: 2|3|1|1
 == relaunch
-store digest before relaunch: 86edc6c71d4b1a2659f21125fbeb7d54fd2492f8b6e8263d03d91cd8f51ff835
-store digest after relaunch:  86edc6c71d4b1a2659f21125fbeb7d54fd2492f8b6e8263d03d91cd8f51ff835
+store digest before relaunch: 339771122bbef38c19a35a8bf44f167244638eefec7dbf984372473ddb200fbf
+store digest after relaunch:  339771122bbef38c19a35a8bf44f167244638eefec7dbf984372473ddb200fbf
 PASS

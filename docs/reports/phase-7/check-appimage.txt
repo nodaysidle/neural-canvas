@@ -1,8 +1,8 @@
 == ubuntu:24.04 (PRETTY_NAME="Ubuntu 24.04.5 LTS")
 window appeared: yes
 libraries:
-/tmp/appimage_extracted_51cb9db27515897c9246ef5283f33c2d/usr/lib/fallback/libvulkan.so.1
-/tmp/appimage_extracted_51cb9db27515897c9246ef5283f33c2d/usr/lib/fallback/libxkbcommon.so.0
+/tmp/appimage_extracted_5b9e553ed33168f396e6f5e42c04f2ff/usr/lib/fallback/libvulkan.so.1
+/tmp/appimage_extracted_5b9e553ed33168f396e6f5e42c04f2ff/usr/lib/fallback/libxkbcommon.so.0
 /usr/lib/x86_64-linux-gnu/libvulkan_asahi.so
 /usr/lib/x86_64-linux-gnu/libvulkan_gfxstream.so
 /usr/lib/x86_64-linux-gnu/libvulkan_intel.so
@@ -16,8 +16,8 @@ libraries:
 xkbcommon: ERROR: couldn't find a Compose file for locale "C" (mapped to "C")
 window appeared: yes
 libraries:
-/tmp/appimage_extracted_51cb9db27515897c9246ef5283f33c2d/usr/lib/fallback/libvulkan.so.1
-/tmp/appimage_extracted_51cb9db27515897c9246ef5283f33c2d/usr/lib/fallback/libxkbcommon.so.0
+/tmp/appimage_extracted_5b9e553ed33168f396e6f5e42c04f2ff/usr/lib/fallback/libvulkan.so.1
+/tmp/appimage_extracted_5b9e553ed33168f396e6f5e42c04f2ff/usr/lib/fallback/libxkbcommon.so.0
 /usr/lib64/libvulkan_broadcom.so
 /usr/lib64/libvulkan_freedreno.so
 /usr/lib64/libvulkan_intel.so

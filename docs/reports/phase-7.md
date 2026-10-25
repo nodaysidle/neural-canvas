@@ -21,25 +21,25 @@ is local: no remote, no push, no AUR upload, no tag, no release.
 
 ## Artefacts
 
-Built from commit `9b905d8`. The binary is compiled once, in ubuntu:24.04 with Rust 1.98.1, and shared
+Built from commit `c90ab13`. The binary is compiled once, in ubuntu:24.04 with Rust 1.98.1, and shared
 by the binary tarball, `neuralcanvas-bin` and the AppImage. It needs glibc 2.39 or newer (Ubuntu
 24.04+, Fedora 40+, Debian 13, Arch).
 
 | Artefact | Size | SHA-256 |
 |---|---|---|
-| `neuralcanvas-0.1.0.tar.gz` (source) | 0.95 MB | `c8c7d80fa7da831e0bd7c6257ede45bf30f5718f0d47dc9672314e0425905878` |
-| `neuralcanvas-0.1.0-x86_64.tar.zst` (binary) | 6.97 MB | `23bed370d9b727d4d7104882b932a6d452b656adb1c37bae53501ba6d683f4e0` |
-| `NeuralCanvas-0.1.0-x86_64.AppImage` | 9.67 MB | `e1bc24dad70ea21aea0a63de83fb2f1acca3b6ee147f8ef8ebd921e64c60e980` |
+| `neuralcanvas-0.1.0.tar.gz` (source) | 0.95 MB | `dde9d1ae7755d6b5dd687b2397ab51627149df291524c623ab5e95b253a60f83` |
+| `neuralcanvas-0.1.0-x86_64.tar.zst` (binary) | 6.97 MB | `12ffa54dfe7cea78333c9467b2e75284ed6dab792e58fff88b8a1c476c786f5e` |
+| `NeuralCanvas-0.1.0-x86_64.AppImage` | 9.67 MB | `fb7057de4b11a0cc5defd44fde214e81ac0b831e87bc0acea604da1f3fb6f037` |
 
 Budgets (PERFORMANCE-BUDGET.md): binary 21.50 MB stripped of 25 MB; AppImage 9.67 MB of 40 MB. The
 packages makepkg built from these: `neuralcanvas` 8.74 MB, `neuralcanvas-bin` 8.88 MB.
 
-`sha256sum -c` prints OK for all three (`phase-7/checksums.txt`). A second `release.sh` run gave the
-same three checksums byte for byte, and a commit that only changes the PKGBUILD checksums or the
-reports leaves all three unchanged (the source tarball is archived from the tree, which carries no
-commit id; archive times come from the last commit that changed what ships). So the checksums
-committed in the PKGBUILDs hold at `HEAD`. The rebuild reused the warm Cargo cache; a rebuild from a
-cold cache was not compared.
+`sha256sum -c` prints OK for all three (`phase-7/checksums.txt`). Two `release.sh` runs on a clean
+tree gave the same three files byte for byte. A commit that only changes the PKGBUILD checksums or the
+reports doesn't change them either: the source tarball is archived from the tree (an archived commit
+carries its id) with its file times pinned to the last commit that changed what ships, and the binary
+tarball and AppImage use the same time. So the checksums committed in the PKGBUILDs hold at `HEAD`.
+Both builds reused the warm Cargo cache; a build from a cold cache was not compared.
 
 ## Validation
 
@@ -68,11 +68,11 @@ store's digest (every element row, sketch style, preset and project) must match 
 
 | Run | Store after first session | Digest before and after relaunch |
 |---|---|---|
-| Release binary | 2 projects, 3 elements, 1 styled sketch, 1 preset; 8 exports | `6a702753…` = `6a702753…` |
-| AppImage | same | `86edc6c7…` = `86edc6c7…` |
+| Release binary | 2 projects, 3 elements, 1 styled sketch, 1 preset; 8 exports | `89c840e2…` = `89c840e2…` |
+| AppImage | same | `33977112…` = `33977112…` |
 
-Earlier in the phase, the same flow passed six more times on earlier builds (three binary, three
-AppImage); the two runs above are on the final artefacts.
+The same flow also passed on each earlier build this phase; the two runs above are on the final
+artefacts.
 
 ## Decisions and departures from the brief
 
@@ -93,9 +93,12 @@ AppImage); the two runs above are on the final artefacts.
 - **Homepage** in the metainfo and PKGBUILDs is `https://github.com/nodaysidle` until the Linux
   repository's public name is settled (PLAN §9 q2). The vault mentions
   `github.com/nodaysidle/neuralcanvas` only in an older brief.
-- **Two fixes after the first release build:** `smoke.sh` left `wl-copy` holding its output pipe
-  (a piped run never ended), and the source tarball embedded the commit id, so committing the
-  checksums changed it. Both fixed; every check above was rerun on the build from the fixed commit.
+- **Three fixes after the first release build:** `smoke.sh` left `wl-copy` holding its output pipe
+  (a piped run never ended); the source tarball embedded the commit id, and archived from a tree it
+  took the current time instead, so its checksum changed with every commit and every build. Fixed by
+  archiving the tree with `--mtime` pinned. An earlier "identical rebuild" result of mine was wrong:
+  the rebuild had refused to run on a dirty tree and I compared the old checksums with themselves.
+  Every check above was rerun on the build from the final commit.
 - **Tools pinned by checksum:** appimagetool 1.9.1 and type2-runtime 20251108, verified by SHA-256 in
   `build.sh`. The pins are from my first download, not from an upstream checksum list.
 - **Docker** was started for this session at your go-ahead; nothing was installed on the host.

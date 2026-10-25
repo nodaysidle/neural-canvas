@@ -18,7 +18,7 @@ provides=('neuralcanvas')
 conflicts=('neuralcanvas')
 options=('!strip' '!debug')
 source_x86_64=("neuralcanvas-$pkgver-$CARCH.tar.zst")
-sha256sums_x86_64=('23bed370d9b727d4d7104882b932a6d452b656adb1c37bae53501ba6d683f4e0')
+sha256sums_x86_64=('12ffa54dfe7cea78333c9467b2e75284ed6dab792e58fff88b8a1c476c786f5e')
 
 package() {
   cp -a "$srcdir/neuralcanvas-$pkgver/usr" "$pkgdir/"
