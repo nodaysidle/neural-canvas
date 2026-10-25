@@ -32,7 +32,9 @@ rm -rf "$dist"
 mkdir -p "$dist"
 
 echo "== source"
-git archive --format=tar --prefix="neuralcanvas-$ver/" "$tree" | gzip -n -9 > "$dist/neuralcanvas-$ver.tar.gz"
+# The tree, not the commit: an archived commit carries its id in the tar header, so the checksum would
+# change with every commit, even one that changes nothing that ships.
+git archive --format=tar --prefix="neuralcanvas-$ver/" "$tree^{tree}" | gzip -n -9 > "$dist/neuralcanvas-$ver.tar.gz"
 
 echo "== binary tarball and AppImage (ubuntu:24.04, Rust $rust)"
 docker run --rm \
