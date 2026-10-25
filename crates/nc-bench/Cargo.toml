@@ -1,0 +1,19 @@
+[package]
+name = "nc-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Measurement harness (S2k frame pacing, latency, tablet probe). Dev tool, never packaged."
+
+[dependencies]
+nc-core.workspace = true
+nc-render.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols = { version = "0.32", features = ["client"] }
+rustix = { version = "1", features = ["time"] }

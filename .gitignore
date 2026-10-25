@@ -1,0 +1,23 @@
+/target
+/dist
+/build
+*.AppImage
+*.pkg.tar.zst
+/pkg
+/src/*.tar.*
+# local data, traces, secrets
+*.db
+*.db-wal
+*.db-shm
+*.tracy
+.env
+*.key
+# editors / tooling caches
+.idea/
+.vscode/
+*.swp
+graft/
+.trail/
+
+# Local Claude memory
+CLAUDE.local.md

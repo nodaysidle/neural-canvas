@@ -1,0 +1,11 @@
+[package]
+name = "nc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+kurbo = "0.13"
+rand = { version = "0.10", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }

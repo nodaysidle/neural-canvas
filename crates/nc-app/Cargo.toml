@@ -1,0 +1,18 @@
+[package]
+name = "neuralcanvas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Tracy instrumentation for perf runs. Release builds never enable it.
+profile = ["dep:tracy-client", "nc-render/profile"]
+
+[dependencies]
+tracy-client = { workspace = true, optional = true }
+nc-core.workspace = true
+nc-render.workspace = true
+glam.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true

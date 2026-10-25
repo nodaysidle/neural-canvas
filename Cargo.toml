@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/nc-core", "crates/nc-render", "crates/nc-app", "crates/nc-bench", "crates/spike-iced"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+nc-core = { path = "crates/nc-core" }
+nc-render = { path = "crates/nc-render" }
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+wgpu = "30"
+winit = "0.30"
+pollster = "1"
+tracy-client = "0.19"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
