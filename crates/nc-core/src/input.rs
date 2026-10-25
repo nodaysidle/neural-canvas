@@ -58,9 +58,96 @@ impl Smoother {
     }
 }
 
+/// Velocity is measured over this much recent input, seconds.
+const PREDICT_WINDOW: f64 = 0.025;
+/// No prediction once the pointer has been still this long: the hand stopped.
+const PREDICT_STALE: f64 = 0.03;
+/// Longest predicted lead, screen px: a mis-prediction never draws a visible spike.
+const MAX_LEAD: f32 = 24.0;
+
+/// Predicted ink: extends the live stroke along its current velocity by about one refresh, so what
+/// reaches the screen matches where the pen is rather than where it was when the frame was drawn. The
+/// prediction is drawn, never stored; the next real sample replaces it.
+#[derive(Default)]
+pub struct Predictor {
+    /// Recent (time, smoothed screen position), oldest first.
+    samples: [(f64, Vec2); 8],
+    len: usize,
+}
+
+impl Predictor {
+    pub fn reset(&mut self) {
+        self.len = 0;
+    }
+
+    pub fn push(&mut self, time: f64, p: Vec2) {
+        if self.len == self.samples.len() {
+            self.samples.rotate_left(1);
+            self.len -= 1;
+        }
+        self.samples[self.len] = (time, p);
+        self.len += 1;
+    }
+
+    /// Where the pointer will be `horizon` seconds after its latest sample, given that it is `now`.
+    pub fn predict(&self, now: f64, horizon: f64) -> Option<Vec2> {
+        let recent = &self.samples[..self.len];
+        let &(t1, p1) = recent.last()?;
+        if now - t1 > PREDICT_STALE {
+            return None;
+        }
+        let &(t0, p0) = recent.iter().find(|(t, _)| t1 - t <= PREDICT_WINDOW)?;
+        if t1 - t0 < 1e-3 {
+            return None;
+        }
+        let lead = (p1 - p0) / (t1 - t0) as f32 * horizon as f32;
+        Some(p1 + lead.clamp_length_max(MAX_LEAD))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prediction_extends_steady_motion_and_stops_with_the_hand() {
+        let mut p = Predictor::default();
+        assert_eq!(p.predict(0.0, 0.008), None);
+        // 1,000 px/s to the right, sampled at 1 kHz.
+        for i in 0..20 {
+            p.push(i as f64 * 1e-3, Vec2::new(i as f32, 50.0));
+        }
+        let ahead = p.predict(0.019, 0.008).unwrap();
+        assert!((ahead - Vec2::new(27.0, 50.0)).length() < 1e-3, "{ahead}");
+        assert_eq!(p.predict(0.06, 0.008), None, "still for 41 ms");
+        // A flick at 20,000 px/s leads by at most MAX_LEAD.
+        p.reset();
+        p.push(0.0, Vec2::ZERO);
+        p.push(0.005, Vec2::new(100.0, 0.0));
+        assert_eq!(p.predict(0.005, 0.008), Some(Vec2::new(124.0, 0.0)));
+    }
+
+    #[test]
+    fn prediction_error_on_a_curve_is_small() {
+        // A 200 px radius circle at 1,500 px/s (a brisk stroke), 1 kHz samples, 8.3 ms horizon.
+        let (r, speed, horizon) = (200.0_f64, 1500.0_f64, 1.0 / 120.0);
+        let at = |t: f64| {
+            let a = t * speed / r;
+            Vec2::new((r * a.cos()) as f32, (r * a.sin()) as f32)
+        };
+        let mut p = Predictor::default();
+        let mut worst = 0.0_f32;
+        for i in 0..400 {
+            let t = i as f64 * 1e-3;
+            p.push(t, at(t));
+            if i > 30 {
+                let err = p.predict(t, horizon).unwrap().distance(at(t + horizon));
+                worst = worst.max(err);
+            }
+        }
+        // Lead is 12.5 px; linear extrapolation misses the curve by about a third of a px.
+        assert!(worst < 1.0, "worst error {worst} px");
+    }
 
     /// Worst lag behind the raw pen over a stroke at constant speed, from `settle` s in.
     fn lag_at(speed: f32, settle: f64) -> f32 {

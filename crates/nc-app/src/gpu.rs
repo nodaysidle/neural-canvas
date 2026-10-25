@@ -1,7 +1,7 @@
 //! The window's wgpu surface and the canvas renderer.
 
-use nc_core::{Document, Viewport};
-use nc_render::{LiveStroke, Renderer};
+use nc_core::Viewport;
+use nc_render::{Renderer, Scene};
 use std::sync::Arc;
 use winit::event_loop::ActiveEventLoop;
 use winit::platform::wayland::WindowAttributesExtWayland;
@@ -77,8 +77,7 @@ impl Gpu {
     /// feedback must be requested then). Returns false if no frame was presented.
     pub fn draw(
         &mut self,
-        doc: &Document,
-        live: Option<LiveStroke>,
+        scene: &Scene,
         viewport: &Viewport,
         before_present: impl FnOnce(),
     ) -> bool {
@@ -104,8 +103,7 @@ impl Gpu {
             &self.queue,
             &mut encoder,
             &view,
-            doc,
-            live,
+            scene,
             viewport,
             size,
             scale,

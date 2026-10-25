@@ -25,12 +25,27 @@ impl Gpu {
         Some(Self { device, queue })
     }
 
-    /// Renders one frame at `logical` px × `scale` and returns tightly packed RGBA rows.
     fn frame(
         &self,
         r: &mut Renderer,
         doc: &Document,
         live: Option<LiveStroke>,
+        viewport: &Viewport,
+        logical: u32,
+        scale: f32,
+    ) -> Image {
+        let scene = Scene {
+            live,
+            ..Scene::doc(doc)
+        };
+        self.frame_with(r, &scene, viewport, logical, scale)
+    }
+
+    /// Renders one frame at `logical` px × `scale` and returns tightly packed RGBA rows.
+    fn frame_with(
+        &self,
+        r: &mut Renderer,
+        scene: &Scene,
         viewport: &Viewport,
         logical: u32,
         scale: f32,
@@ -65,8 +80,7 @@ impl Gpu {
             &self.queue,
             &mut enc,
             &view,
-            doc,
-            live,
+            scene,
             viewport,
             [size, size],
             scale,
@@ -128,7 +142,7 @@ const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 #[test]
 fn segment_layout_is_tight() {
-    assert_eq!(size_of::<SegmentInstance>(), 36);
+    assert_eq!(size_of::<SegmentInstance>(), 40);
     assert_eq!(offset_of!(SegmentInstance, color), 20);
     assert_eq!(size_of::<ViewUniform>() % 16, 0);
 }
@@ -227,6 +241,94 @@ fn per_stroke_cache_follows_edits() {
         img.at(32, 32)
     );
     assert_eq!(r.stats().rebuilds, 0);
+}
+
+/// Shapes draw as ink, the overlay draws on top of everything, and a move rewrites strokes in place.
+#[test]
+fn shapes_overlay_and_moves() {
+    let Some(gpu) = Gpu::new() else { return };
+    let rect = Arc::new(Element::new(ElementKind::Shape(nc_core::Shape {
+        kind: nc_core::ShapeKind::Rectangle,
+        from: Vec2::new(8.0, 8.0),
+        to: Vec2::new(56.0, 56.0),
+        width: 4.0,
+        color: RED,
+    })));
+    let line = stroke(Vec2::new(4.0, 32.0), Vec2::new(60.0, 32.0), 4.0, GREEN);
+    let mut session = Session::new(
+        ElementId::nil(),
+        Document::from_elements([rect, line.clone()]),
+    );
+    let mut r = Renderer::new(&gpu.device, FORMAT);
+    let v = Viewport::default();
+    let overlay = [Segment {
+        a: Vec2::new(32.0, 4.0),
+        b: Vec2::new(32.0, 60.0),
+        half_width: 2.0,
+        color: BLUE,
+    }];
+    let scene = Scene {
+        overlay: &overlay,
+        ..Scene::doc(session.doc())
+    };
+    let img = gpu.frame_with(&mut r, &scene, &v, 64, 1.0);
+    assert!(
+        img.at(32, 8)[2] > 240,
+        "overlay over the rect's top edge: {:?}",
+        img.at(32, 8)
+    );
+    assert!(img.at(20, 8)[0] > 240, "rect top edge: {:?}", img.at(20, 8));
+    assert!(
+        img.at(56, 20)[0] > 240,
+        "rect right edge: {:?}",
+        img.at(56, 20)
+    );
+    assert!(
+        img.at(20, 20)[0] < 80,
+        "rect is an outline: {:?}",
+        img.at(20, 20)
+    );
+
+    // Lifted (being dragged): drawn moved, the document untouched, uploaded once.
+    let lifted_ids = HashSet::from([line.id]);
+    for dy in [4.0, 12.0] {
+        let scene = Scene {
+            lifted: Some(Lifted {
+                ids: &lifted_ids,
+                transform: nc_core::kurbo::Affine::translate((0.0, dy)),
+            }),
+            ..Scene::doc(session.doc())
+        };
+        let img = gpu.frame_with(&mut r, &scene, &v, 64, 1.0);
+        let y = 32 + dy as u32;
+        assert!(img.at(20, y)[1] > 240, "lifted to {y}: {:?}", img.at(20, y));
+        assert!(
+            img.at(20, 32)[1] < 80,
+            "not at the press: {:?}",
+            img.at(20, 32)
+        );
+    }
+    assert_eq!(
+        r.stats().edited_uploaded,
+        0,
+        "following the drag uploads nothing"
+    );
+
+    let moved = nc_core::select::translated(session.doc(), &[line.id], Vec2::new(0.0, 12.0));
+    session.execute("Move", moved).unwrap();
+    let img = gpu.frame(&mut r, session.doc(), None, &v, 64, 1.0);
+    assert!(img.at(20, 44)[1] > 240, "moved down: {:?}", img.at(20, 44));
+    assert!(
+        img.at(20, 32)[1] < 80,
+        "gone from the old place: {:?}",
+        img.at(20, 32)
+    );
+    let stats = r.stats();
+    assert_eq!(
+        (stats.holes, stats.rebuilds, stats.edited_uploaded),
+        (0, 0, 1),
+        "rewritten in place"
+    );
 }
 
 /// The live stroke uploads only its new tail, and a new stroke starts over.

@@ -3,6 +3,8 @@
 //! open sketch's session and goes to the store thread; this thread never touches disk.
 
 mod app;
+mod chrome;
+mod clipboard;
 mod gpu;
 
 use app::App;
@@ -17,6 +19,9 @@ pub enum UserEvent {
     ReducedMotion(bool),
     /// SIGTERM / SIGINT / SIGHUP: save and quit.
     Quit,
+    /// Elements read from the clipboard, to be centred on the point (world units).
+    Pasted(Vec<nc_core::Element>, glam::Vec2),
+    ClipboardFailed(String),
 }
 
 /// Opens the store and the most recent sketch. A damaged sketch opens read-only and empty; anything
@@ -87,6 +92,6 @@ fn main() {
     let _reduced_motion = mundy::Preferences::subscribe(mundy::Interest::ReducedMotion, move |p| {
         let _ = proxy.send_event(UserEvent::ReducedMotion(p.reduced_motion.is_reduce()));
     });
-    let mut app = App::new(store, session, read_only);
+    let mut app = App::new(store, session, read_only, event_loop.create_proxy());
     event_loop.run_app(&mut app).expect("run app");
 }

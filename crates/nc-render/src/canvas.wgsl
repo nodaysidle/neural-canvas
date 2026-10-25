@@ -6,6 +6,13 @@ struct View {
     px_per_pt: f32,    // surface scale factor (fractional on Wayland)
     size: vec2f,       // logical px
     _pad: vec2f,
+    lift_abcd: vec4f,  // affine for lifted segments (a selection being moved), kurbo coefficient order
+    lift_ef: vec4f,
+}
+
+fn lift(p: vec2f) -> vec2f {
+    let m = view.lift_abcd;
+    return vec2f(m.x * p.x + m.z * p.y, m.y * p.x + m.w * p.y) + view.lift_ef.xy;
 }
 @group(0) @binding(0) var<uniform> view: View;
 
@@ -45,6 +52,7 @@ struct Seg {
     @location(1) b: vec2f,
     @location(2) half_width: f32,
     @location(3) color: vec4f,
+    @location(4) lifted: u32,
 }
 
 struct SegOut {
@@ -63,19 +71,25 @@ struct SegOut {
     );
     let px_world = 1.0 / (view.scale * view.px_per_pt);
     let hw = max(s.half_width, 0.5 * px_world);   // never thinner than a device hairline
-    let d = s.b - s.a;
+    var sa = s.a;
+    var sb = s.b;
+    if s.lifted == 1u {
+        sa = lift(sa);
+        sb = lift(sb);
+    }
+    let d = sb - sa;
     let len = length(d);
     let t = select(vec2f(1.0, 0.0), d / len, len > 1e-6);
     let n = vec2f(-t.y, t.x);
     let r = hw + px_world;                        // 1 px margin for the AA ramp
     let c = corners[vi];
-    let p = mix(s.a - t * r, s.b + t * r, c.x) + n * r * c.y;
+    let p = mix(sa - t * r, sb + t * r, c.x) + n * r * c.y;
 
     var o: SegOut;
     o.pos = world_to_clip(p);
     o.world = p;
-    o.a = s.a;
-    o.b = s.b;
+    o.a = sa;
+    o.b = sb;
     o.half_width = hw;
     o.color = s.color;
     return o;

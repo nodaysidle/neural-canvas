@@ -54,6 +54,32 @@ Risks taken on, resolved by the Phase 0 spike ([`reports/phase-0.md`](reports/ph
 - **Wayland side channel:** `crates/nc-wayland` (presentation feedback + `zwp_tablet_v2`) is shared by the
   app and the bench. It must never read the socket itself (that starves winit's own events).
 
+### Decisions after Phase 2 review (2026-10-25)
+
+- **Ink latency (was q7):** predicted ink, not a budget change. The live tip is extrapolated one refresh
+  ahead; the unpredicted 23.2 ms p95 stays documented in `reports/phase-2.md` as the raw baseline.
+- **Zoom shortcuts (was q8):** `Ctrl+0` fit, `Ctrl+1` 100 % (UX-PRINCIPLES §4), as shipped.
+
+### Phase 3 decisions (2026-10-25, [`reports/phase-3.md`](reports/phase-3.md))
+
+- **Moves and resizes are lifted onto the GPU:** the document is untouched while dragging; the renderer
+  draws the selection through the drag's affine (per-instance flag + view uniform) and the edit is
+  committed once on release. Per-frame cost no longer depends on selection size (500 strokes: 119 fps).
+- **Spatial index:** `rstar` over element bounds with deferred, per-element-coalesced updates applied
+  at the next query; an id → index map makes edits by id O(1).
+- **Selection semantics:** click picks the topmost ink (4 px); marquee and lasso select what they fully
+  enclose; Shift adds / toggles; Alt+drag is the lasso.
+- **Eraser:** cuts at the disc's edge along the swept path; the first piece keeps the id and z-position;
+  a cut shape becomes stroke pieces; one drag is one undo step.
+- **Predicted ink:** linear velocity over the last 25 ms, one refresh ahead, capped at 24 px, drawn in the
+  overlay only. Measured tip error p95 1.3 px (8.5 px unpredicted); camera confirmation still open.
+- **Clipboard:** `wl-clipboard-rs` on a worker thread; offers `application/x-neuralcanvas`, SVG and PNG
+  (2×, canvas background); pastes only its own format.
+- **`nc-export` arrived in Phase 3** (SVG writer + PNG via `resvg`), because copy needs it; Phase 4 adds
+  PDF and the wireframe.
+- **Frame scheduler:** frames whose work exceeds twice the running average plus 1 ms do not tune the
+  phase (a slow one-off frame is not a late phase).
+
 **Crates (name the library, don't hand-roll):** `glam` (math), `kurbo` (curves, flattening),
 `rstar` (R-tree hit-test/culling), `bytemuck` (`#[repr(C)]` + `Pod` GPU structs), `rusqlite` (bundled,
 WAL) + `serde` + `postcard` + `uuid` (persistence), `rayon` (workers), `crossbeam-channel`,
@@ -83,7 +109,7 @@ crates/
   spike-iced/  Phase 0 iced 0.14 host spike, kept as the rerun harness for the shell decision.
 packaging/     PKGBUILD, PKGBUILD-bin, .desktop, metainfo.xml, icons, AppImage recipe.
 ```
-Present after Phase 2: `nc-core`, `nc-render`, `nc-store`, `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`. `nc-export` arrives in Phase 4.
+Present after Phase 3: `nc-core`, `nc-render`, `nc-store`, `nc-export` (SVG + PNG; PDF in Phase 4), `nc-wayland`, `nc-app`, `nc-bench`, `spike-iced`.
 
 **Coordinates (one convention, everywhere):** world space is y-down, origin top-left, 1 unit = 1 logical px
 at 100%. `screen = world * scale + offset`. Matches Wayland, SVG, PDF and PNG; the only flip is world→clip in
@@ -207,9 +233,6 @@ loader; build in an Ubuntu 24.04 container for glibc reach. Every artefact gets 
 4. Which pen tablet is on the reference machine (Wacom/Huion/XP-Pen)?
 5. App id domain: `sh.nodaysidle` or other?
 6. AppImage required at launch, or AUR first?
-7. Input-to-photon ≤ 20 ms p95 is not reachable from the app alone on Hyprland's default pipeline
-   (measured p95 23.2 ms event → scanout). Options: amend the budget, add predicted ink (extrapolate the
-   live tail by ~one refresh, as platform ink APIs do), or validate a compositor setting
-   (`render:direct_scanout` for fullscreen). Recommendation: predicted ink, measured, in Phase 3.
-8. Zoom shortcuts: the Phase 2 brief said Ctrl+9 fit / Ctrl+0 100 %; §4 of UX-PRINCIPLES says Ctrl+0 fit /
-   Ctrl+1 100 % (implemented). Which one?
+7. ~~Input-to-photon vs Hyprland's pipeline~~: resolved 2026-10-25, predicted ink (§1, decisions after
+   Phase 2). Open part: a 240 fps camera run to confirm the derived ~14 ms p95.
+8. ~~Zoom shortcuts~~: resolved 2026-10-25, `Ctrl+0` fit / `Ctrl+1` 100 %.

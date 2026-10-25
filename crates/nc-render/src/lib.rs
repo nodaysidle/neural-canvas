@@ -2,9 +2,10 @@
 //! window surface, offscreen tests and PNG export.
 
 use bytemuck::{Pod, Zeroable};
-use nc_core::document::{stroke_segment_count, stroke_segments, stroke_segments_from};
+use nc_core::document::{element_segments, stroke_segment_count, stroke_segments_from};
+use nc_core::kurbo::Affine;
 use nc_core::{Document, Element, ElementId, ElementKind, Segment, Stroke, Viewport};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::{offset_of, size_of};
 use std::ops::Range;
 use std::sync::Arc;
@@ -17,6 +18,8 @@ struct ViewUniform {
     px_per_pt: f32,
     size: [f32; 2],
     _pad: [f32; 2],
+    /// Affine for lifted segments, kurbo order (a b c d) then (e f, padding).
+    lift: [f32; 8],
 }
 
 #[repr(C)]
@@ -26,10 +29,12 @@ pub struct SegmentInstance {
     pub b: [f32; 2],
     pub half_width: f32,
     pub color: [f32; 4],
+    /// 1: part of the lifted selection, drawn through the lift transform.
+    pub lifted: u32,
 }
 
 // Offsets come from the compiler, never hand-typed (Mac bug #8: wrong vertex attribute offset).
-const SEGMENT_ATTRS: [wgpu::VertexAttribute; 4] = [
+const SEGMENT_ATTRS: [wgpu::VertexAttribute; 5] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x2,
         offset: offset_of!(SegmentInstance, a) as u64,
@@ -50,6 +55,11 @@ const SEGMENT_ATTRS: [wgpu::VertexAttribute; 4] = [
         offset: offset_of!(SegmentInstance, color) as u64,
         shader_location: 3,
     },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: offset_of!(SegmentInstance, lifted) as u64,
+        shader_location: 4,
+    },
 ];
 
 pub const CLEAR: wgpu::Color = wgpu::Color {
@@ -67,6 +77,35 @@ pub struct LiveStroke<'a> {
     pub stroke: &'a Stroke,
 }
 
+/// Elements being moved or resized: drawn where `transform` puts them, while the document still holds
+/// them where they were at the press. Only the uniform changes per frame, however many are lifted.
+#[derive(Clone, Copy)]
+pub struct Lifted<'a> {
+    pub ids: &'a HashSet<ElementId>,
+    pub transform: Affine,
+}
+
+/// Everything one frame draws, bottom to top.
+#[derive(Clone, Copy)]
+pub struct Scene<'a> {
+    pub doc: &'a Document,
+    pub live: Option<LiveStroke<'a>>,
+    pub lifted: Option<Lifted<'a>>,
+    /// World-space chrome and predicted ink, on top.
+    pub overlay: &'a [Segment],
+}
+
+impl<'a> Scene<'a> {
+    pub fn doc(doc: &'a Document) -> Self {
+        Self {
+            doc,
+            live: None,
+            lifted: None,
+            overlay: &[],
+        }
+    }
+}
+
 /// What the last frame cost, for tests and the bench.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderStats {
@@ -79,6 +118,8 @@ pub struct RenderStats {
     pub rebuilds: u64,
     /// Segments uploaded for the live stroke in the last frame.
     pub live_uploaded: u32,
+    /// Segments uploaded for edited elements in the last frame.
+    pub edited_uploaded: u32,
 }
 
 /// A committed stroke's segments in the arena. Valid while the document still holds this exact `Arc`:
@@ -88,6 +129,7 @@ struct Cached {
     start: u32,
     count: u32,
     seen: u64,
+    lifted: bool,
 }
 
 /// Compact when z-order is split into more draws than this.
@@ -114,6 +156,11 @@ pub struct Renderer {
     live_serial: Option<u64>,
     live_len: u32,
     live_uploaded: u32,
+    edited_uploaded: u32,
+    /// Chrome and predicted ink, re-sent every frame (a few hundred segments at most).
+    overlay: wgpu::Buffer,
+    overlay_capacity: u32,
+    overlay_len: u32,
     scratch: Vec<SegmentInstance>,
 }
 
@@ -123,7 +170,18 @@ fn instance(s: Segment) -> SegmentInstance {
         b: s.b.to_array(),
         half_width: s.half_width,
         color: s.color,
+        lifted: 0,
     }
+}
+
+/// Appends the element's capsules, flagged as part of the lifted selection or not.
+fn push_instances(out: &mut Vec<SegmentInstance>, element: &Element, lifted: bool) {
+    element_segments(element, |s| {
+        out.push(SegmentInstance {
+            lifted: lifted as u32,
+            ..instance(s)
+        })
+    });
 }
 
 fn push_run(runs: &mut Vec<Range<u32>>, start: u32, count: u32) {
@@ -227,6 +285,10 @@ impl Renderer {
             live_serial: None,
             live_len: 0,
             live_uploaded: 0,
+            edited_uploaded: 0,
+            overlay: Self::instance_buffer(device, 256),
+            overlay_capacity: 256,
+            overlay_len: 0,
             scratch: Vec::new(),
         }
     }
@@ -247,55 +309,69 @@ impl Renderer {
             holes: self.holes,
             rebuilds: self.rebuilds,
             live_uploaded: self.live_uploaded,
+            edited_uploaded: self.edited_uploaded,
         }
     }
 
-    /// Brings the arena in line with `doc`: uploads only strokes that are new or edited since the last
-    /// frame, and lists the draws in z-order. O(elements) per frame, O(points) only for what changed.
-    fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document) {
+    /// Brings the arena in line with `doc`: uploads only elements that are new or edited since the last
+    /// frame, and lists the draws in z-order. O(elements) per frame, O(points) only for what changed. An
+    /// edit that keeps the segment count (a move, a resize) is rewritten in place, so it leaves no hole.
+    fn sync(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        doc: &Document,
+        lifted: Option<&HashSet<ElementId>>,
+    ) {
         #[cfg(feature = "profile")]
         let _span = tracy_client::span!("Renderer::sync");
         self.frame += 1;
         self.runs.clear();
+        self.edited_uploaded = 0;
         let mut overflow = false;
         for element in doc.elements() {
-            let ElementKind::Stroke(stroke) = &element.kind else {
+            if matches!(element.kind, ElementKind::Recognized(_)) {
                 continue;
-            };
-            let current = match self.cache.get_mut(&element.id) {
-                Some(c) if Arc::ptr_eq(&c.element, element) => Some(c),
-                _ => None,
-            };
-            let (start, count) = match current {
-                Some(c) => {
+            }
+            let lift = lifted.is_some_and(|ids| ids.contains(&element.id));
+            let (start, count) = match self.cache.get_mut(&element.id) {
+                Some(c) if Arc::ptr_eq(&c.element, element) && c.lifted == lift => {
                     c.seen = self.frame;
                     (c.start, c.count)
                 }
-                None => {
-                    let count = stroke_segment_count(stroke) as u32;
-                    if self.arena_len + count > self.arena_capacity {
-                        overflow = true;
-                        break;
-                    }
+                cached => {
+                    let old = cached.map(|c| (c.start, c.count));
                     self.scratch.clear();
-                    self.scratch.extend(stroke_segments(stroke).map(instance));
-                    let start = self.arena_len;
+                    push_instances(&mut self.scratch, element, lift);
+                    let count = self.scratch.len() as u32;
+                    let start = match old {
+                        Some((start, n)) if n == count => start,
+                        _ if self.arena_len + count > self.arena_capacity => {
+                            overflow = true;
+                            break;
+                        }
+                        _ => {
+                            self.holes += old.map_or(0, |(_, n)| n);
+                            self.arena_len += count;
+                            self.arena_len - count
+                        }
+                    };
                     queue.write_buffer(
                         &self.arena,
                         start as u64 * STRIDE,
                         bytemuck::cast_slice(&self.scratch),
                     );
-                    self.arena_len += count;
-                    let old = self.cache.insert(
+                    self.edited_uploaded += count;
+                    self.cache.insert(
                         element.id,
                         Cached {
                             element: element.clone(),
                             start,
                             count,
                             seen: self.frame,
+                            lifted: lift,
                         },
                     );
-                    self.holes += old.map_or(0, |o| o.count);
                     (start, count)
                 }
             };
@@ -313,19 +389,26 @@ impl Renderer {
         self.holes += freed;
         if overflow || self.holes * 2 > self.arena_len.max(MIN_ARENA) || self.runs.len() > MAX_RUNS
         {
-            self.rebuild(device, queue, doc);
+            self.rebuild(device, queue, doc, lifted);
         }
     }
 
     /// Re-uploads every stroke contiguously in z-order: one draw, no holes.
-    fn rebuild(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document) {
+    fn rebuild(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        doc: &Document,
+        lifted: Option<&HashSet<ElementId>>,
+    ) {
         self.cache.clear();
         self.scratch.clear();
         self.runs.clear();
         for element in doc.elements() {
-            if let ElementKind::Stroke(stroke) = &element.kind {
+            if !matches!(element.kind, ElementKind::Recognized(_)) {
+                let lift = lifted.is_some_and(|ids| ids.contains(&element.id));
                 let start = self.scratch.len() as u32;
-                self.scratch.extend(stroke_segments(stroke).map(instance));
+                push_instances(&mut self.scratch, element, lift);
                 let count = self.scratch.len() as u32 - start;
                 self.cache.insert(
                     element.id,
@@ -334,6 +417,7 @@ impl Renderer {
                         start,
                         count,
                         seen: self.frame,
+                        lifted: lift,
                     },
                 );
             }
@@ -388,8 +472,22 @@ impl Renderer {
         self.live_len = total;
     }
 
-    /// Draws grid, the document and the stroke being drawn (on top) into `target`. `size` is logical px;
-    /// `px_per_pt` the surface scale factor.
+    fn sync_overlay(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, overlay: &[Segment]) {
+        let n = overlay.len() as u32;
+        if n > self.overlay_capacity {
+            self.overlay_capacity = n.next_power_of_two();
+            self.overlay = Self::instance_buffer(device, self.overlay_capacity);
+        }
+        self.scratch.clear();
+        self.scratch.extend(overlay.iter().copied().map(instance));
+        if n > 0 {
+            queue.write_buffer(&self.overlay, 0, bytemuck::cast_slice(&self.scratch));
+        }
+        self.overlay_len = n;
+    }
+
+    /// Draws the grid and `scene` into `target`. `size` is logical px; `px_per_pt` the surface scale
+    /// factor.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -397,22 +495,28 @@ impl Renderer {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
-        doc: &Document,
-        live: Option<LiveStroke>,
+        scene: &Scene,
         viewport: &Viewport,
         size: [f32; 2],
         px_per_pt: f32,
     ) {
         #[cfg(feature = "profile")]
         let _span = tracy_client::span!("Renderer::render");
-        self.sync(device, queue, doc);
-        self.sync_live(device, queue, live);
+        self.sync(device, queue, scene.doc, scene.lifted.map(|l| l.ids));
+        self.sync_live(device, queue, scene.live);
+        self.sync_overlay(device, queue, scene.overlay);
+        let [a, b, c, d, e, f] = scene
+            .lifted
+            .map_or(Affine::IDENTITY, |l| l.transform)
+            .as_coeffs()
+            .map(|v| v as f32);
         let u = ViewUniform {
             offset: viewport.offset.to_array(),
             scale: viewport.scale,
             px_per_pt,
             size,
             _pad: [0.0; 2],
+            lift: [a, b, c, d, e, f, 0.0, 0.0],
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
 
@@ -442,6 +546,10 @@ impl Renderer {
         if self.live_len > 0 {
             pass.set_vertex_buffer(0, self.live.slice(..));
             pass.draw(0..6, 0..self.live_len);
+        }
+        if self.overlay_len > 0 {
+            pass.set_vertex_buffer(0, self.overlay.slice(..));
+            pass.draw(0..6, 0..self.overlay_len);
         }
     }
 }

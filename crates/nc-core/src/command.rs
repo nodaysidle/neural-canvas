@@ -3,6 +3,7 @@
 
 use crate::document::Document;
 use crate::element::{Element, ElementId};
+use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -194,8 +195,33 @@ pub struct Session {
     pub sketch_id: Uuid,
     doc: Document,
     history: History,
-    /// A drag in progress: its label and the inverses of what it applied so far, oldest first.
-    gesture: Option<(&'static str, Vec<Command>)>,
+    gesture: Option<Gesture>,
+}
+
+/// A drag in progress: its label and the inverses of what it applied so far, oldest first.
+#[derive(Debug)]
+struct Gesture {
+    label: &'static str,
+    inverses: Vec<Command>,
+    /// Elements whose content an earlier inverse already restores.
+    replaced: HashSet<ElementId>,
+}
+
+impl Gesture {
+    /// Keeps one content-restoring inverse per element: undo applies the oldest one last, so later ones
+    /// would be overwritten anyway. An eraser drag that cuts the same stroke a hundred times keeps one.
+    fn push(&mut self, inverse: Command) {
+        match inverse {
+            // A batch's inverse runs in order; flattened into this oldest-first list it must go reversed.
+            Command::Batch(commands) => commands.into_iter().rev().for_each(|c| self.push(c)),
+            Command::Replace { element } => {
+                if self.replaced.insert(element.id) {
+                    self.inverses.push(Command::Replace { element });
+                }
+            }
+            other => self.inverses.push(other),
+        }
+    }
 }
 
 impl Session {
@@ -221,29 +247,35 @@ impl Session {
         self.history.execute(&mut self.doc, label, command)
     }
 
-    /// Applies part of a drag (e.g. each stroke an eraser drag touches) right away, so the canvas
-    /// updates live, while the whole drag stays one undo step. Ends with [`end_gesture`](Self::end_gesture).
+    /// Applies part of a drag (each cut an eraser drag makes) right away, so the
+    /// canvas updates live, while the whole drag stays one undo step. Ends with
+    /// [`end_gesture`](Self::end_gesture).
     pub fn apply_in_gesture(
         &mut self,
         label: &'static str,
         command: Command,
     ) -> Result<(), CommandError> {
         let inverse = command.apply(&mut self.doc)?;
-        match &mut self.gesture {
-            Some((open, inverses)) if *open == label => inverses.push(inverse),
-            _ => {
-                self.end_gesture();
-                self.gesture = Some((label, vec![inverse]));
-            }
+        if self.gesture.as_ref().is_none_or(|g| g.label != label) {
+            self.end_gesture();
+            self.gesture = Some(Gesture {
+                label,
+                inverses: Vec::new(),
+                replaced: HashSet::new(),
+            });
         }
+        let gesture = self.gesture.as_mut().expect("opened above");
+        gesture.push(inverse);
         Ok(())
     }
 
     /// Records the drag in progress as one undo step. Nothing happens if the drag changed nothing.
     pub fn end_gesture(&mut self) {
-        if let Some((label, mut inverses)) = self.gesture.take() {
-            inverses.reverse();
-            self.history.record(label, Command::Batch(inverses));
+        if let Some(mut g) = self.gesture.take()
+            && !g.inverses.is_empty()
+        {
+            g.inverses.reverse();
+            self.history.record(g.label, Command::Batch(g.inverses));
         }
     }
 
@@ -458,6 +490,43 @@ mod tests {
                 prop_assert!(session.redo().unwrap());
             }
             prop_assert_eq!(session.doc().elements(), last.as_slice());
+        }
+
+        /// The id index and the spatial index (which applies edits lazily, at the next query) agree
+        /// with a brute-force scan after any mix of edits, undos and queries.
+        #[test]
+        fn indexes_match_brute_force(
+            initial in prop::collection::vec(-1e4f32..1e4, 0..8),
+            ops in prop::collection::vec((op(), any::<bool>(), any::<bool>()), 0..40),
+            probe in -1e4f64..1e4,
+        ) {
+            let doc = Document::from_elements(initial.into_iter().map(|x| Arc::new(stroke_at(x))));
+            let mut session = Session::new(Uuid::new_v4(), doc);
+            let area = kurbo::Rect::new(probe, -5.0, probe + 4e3, 5.0);
+            for (op, undo, query) in &ops {
+                if let Some((label, command)) = resolve(op, session.doc()) {
+                    session.execute(label, command).unwrap();
+                }
+                if *undo {
+                    session.undo().unwrap();
+                }
+                let doc = session.doc();
+                for (i, e) in doc.elements().iter().enumerate() {
+                    prop_assert_eq!(doc.index_of(e.id), Some(i));
+                }
+                if *query {
+                    let mut found = doc.query(area);
+                    found.sort();
+                    let mut expected: Vec<_> = doc
+                        .elements()
+                        .iter()
+                        .filter(|e| e.bounds().is_some_and(|b| b.overlaps(area)))
+                        .map(|e| e.id)
+                        .collect();
+                    expected.sort();
+                    prop_assert_eq!(found, expected);
+                }
+            }
         }
     }
 }

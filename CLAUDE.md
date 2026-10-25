@@ -9,7 +9,7 @@
 
 ## Project Overview
 - **Product**: GPU-accelerated sketch-to-wireframe canvas for Linux (Arch Linux + Wayland/Hyprland first). Local-first, zero cloud dependencies.
-- **Stack**: Rust 2024 (1.89+), Cargo workspace (`nc-core`, `nc-render`, `nc-store`, `nc-wayland`, `nc-app`, plus dev-only `nc-bench` and `spike-iced`).
+- **Stack**: Rust 2024 (1.89+), Cargo workspace (`nc-core`, `nc-render`, `nc-store`, `nc-export`, `nc-wayland`, `nc-app`, plus dev-only `nc-bench` and `spike-iced`).
   - Window & Canvas: `winit 0.30` + `wgpu 30` (Vulkan on Mesa).
   - Math & Geometry: `glam 0.34`, `bytemuck 1.x`, `kurbo`, `rstar`.
   - App Shell: `iced 0.14` hosting the canvas via `shader` widget (Phase 5).
@@ -17,6 +17,7 @@
   - `crates/nc-core`: Document model, stroke geometry, viewport transform math. Strictly NO GPU, NO windowing types.
   - `crates/nc-render`: `wgpu` canvas renderer (grid + instanced SDF capsule strokes via `canvas.wgsl`). Offscreen-tested.
   - `crates/nc-store`: SQLite (WAL) persistence on a dedicated store thread: one row per element, 300 ms debounce, schema migrations.
+  - `crates/nc-export`: SVG writer (single source of truth) and PNG via `resvg`; PDF/JPEG in Phase 4.
   - `crates/nc-wayland`: side channel on winit's `wl_display` (presentation feedback, tablet-v2). Never reads the socket itself.
   - `crates/nc-app`: `neuralcanvas` binary (winit window, wgpu surface, event pump, input -> core -> render).
 

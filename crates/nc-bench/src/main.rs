@@ -2,11 +2,11 @@
 //!
 //! ```text
 //! nc-bench offscreen [frames]                    renderer cost vs scene size, headless, 2560x1440
-//! nc-bench window <panzoom|draw|input> <fifo|mailbox|immediate> [secs] [latch]
+//! nc-bench window <panzoom|draw|move|input> <fifo|mailbox|immediate> [secs] [latch]
 //!                                                latch: `auto` (the app's adaptive schedule) or a fixed
 //!                                                delay in ms after the frame callback (default 0)
 //! nc-bench tablet [secs]                         log zwp_tablet_v2 vs winit pointer events
-//! nc-bench drive <secs> [hz] [strokes]            virtual pointer circling the output; `strokes` holds the
+//! nc-bench drive <secs> [hz] [strokes] | script < commands            virtual pointer circling the output; `strokes` holds the
 //!                                                left button to draw arcs (end-to-end app checks)
 //! nc-bench samples                               per-sample cost of the input hot path
 //! nc-bench store [dir]                           S2k save/load cost against a real file; with `dir`, keeps
@@ -34,6 +34,7 @@ fn main() {
             let scenario = match arg(1) {
                 Some("panzoom") => Scenario::PanZoom,
                 Some("draw") => Scenario::Draw,
+                Some("move") => Scenario::Move,
                 Some("input") => Scenario::Input,
                 _ => usage(),
             };
@@ -54,6 +55,7 @@ fn main() {
             });
         }
         Some("samples") => samples::run(1_000_000),
+        Some("drive") if arg(1) == Some("script") => drive::script(std::io::stdin().lock()),
         Some("drive") => drive::run(secs(1, 10.0), secs(2, 500.0), arg(3) == Some("strokes")),
         Some("store") => match arg(1) {
             Some(dir) => store::run(dir.as_ref(), true),
@@ -71,7 +73,7 @@ fn main() {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: nc-bench offscreen [frames]\n       nc-bench window <panzoom|draw|input> <fifo|mailbox|immediate> [secs] [auto|late_ms]\n       nc-bench tablet [secs]\n       nc-bench drive <secs> [hz] [strokes]\n       nc-bench samples\n       nc-bench store [dir]"
+        "usage: nc-bench offscreen [frames]\n       nc-bench window <panzoom|draw|move|input> <fifo|mailbox|immediate> [secs] [auto|late_ms]\n       nc-bench tablet [secs]\n       nc-bench drive <secs> [hz] [strokes] | script < commands\n       nc-bench samples\n       nc-bench store [dir]"
     );
     std::process::exit(2);
 }

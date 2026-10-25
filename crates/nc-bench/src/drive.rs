@@ -3,6 +3,12 @@
 //! event carries our CLOCK_MONOTONIC ms timestamp, so the bench can measure event → scanout.
 //! (Hyprland 0.56's `cursor.move` warp sends motion without `frame`, which winit never delivers.)
 //! With `strokes`, the left button is held for each half loop, drawing arcs.
+//!
+//! `script` drives a scripted session instead (the Phase 3 recording), one command per stdin line,
+//! positions in output px:
+//!   `move X Y MS`  glide there over MS ms at 250 Hz     `down` / `up`  left button
+//!   `wait MS`                                            `key ARGS…`    run `wtype ARGS…` and wait
+//!   `hold MOD MS`  hold a modifier (wtype) for MS ms while the script continues
 
 use std::time::{Duration, Instant};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
@@ -36,7 +42,11 @@ const EXTENT: (u32, u32) = (2560, 1440);
 /// evdev BTN_LEFT.
 const BTN_LEFT: u32 = 0x110;
 
-pub fn run(secs: f64, hz: f64, strokes: bool) {
+fn connect() -> (
+    Connection,
+    wayland_client::EventQueue<State>,
+    ZwlrVirtualPointerV1,
+) {
     let conn = Connection::connect_to_env().expect("connect to the Wayland display");
     let (globals, mut queue) = registry_queue_init::<State>(&conn).expect("registry");
     let qh = queue.handle();
@@ -45,6 +55,75 @@ pub fn run(secs: f64, hz: f64, strokes: bool) {
         .expect("compositor has no zwlr_virtual_pointer_manager_v1");
     let pointer = manager.create_virtual_pointer(None, &qh, ());
     queue.roundtrip(&mut State).expect("roundtrip");
+    (conn, queue, pointer)
+}
+
+fn now_ms() -> u32 {
+    (nc_wayland::mono_ns() / 1_000_000) as u32
+}
+
+pub fn script(input: impl std::io::BufRead) {
+    let (conn, mut queue, pointer) = connect();
+    let mut at = (EXTENT.0 as f64 / 2.0, EXTENT.1 as f64 / 2.0);
+    let send = |f: &dyn Fn(u32)| {
+        f(now_ms());
+        pointer.frame();
+        conn.flush().expect("flush");
+    };
+    let mut holds = Vec::new();
+    for line in input.lines() {
+        let line = line.expect("read script");
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let num = |i: usize| -> f64 { words[i].parse().expect("number") };
+        match words.first().copied() {
+            None | Some("#") => {}
+            Some("move") => {
+                let (to, ms) = ((num(1), num(2)), num(3));
+                let steps = (ms / 4.0).ceil().max(1.0) as u32;
+                let from = at;
+                for i in 1..=steps {
+                    let k = i as f64 / steps as f64;
+                    at = (from.0 + (to.0 - from.0) * k, from.1 + (to.1 - from.1) * k);
+                    send(&|t| {
+                        pointer.motion_absolute(t, at.0 as u32, at.1 as u32, EXTENT.0, EXTENT.1)
+                    });
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+            }
+            Some(b @ ("down" | "up")) => {
+                let state = if b == "down" {
+                    wl_pointer::ButtonState::Pressed
+                } else {
+                    wl_pointer::ButtonState::Released
+                };
+                send(&|t| pointer.button(t, BTN_LEFT, state));
+            }
+            Some("wait") => std::thread::sleep(Duration::from_secs_f64(num(1) / 1e3)),
+            Some("key") => {
+                let ok = std::process::Command::new("wtype")
+                    .args(&words[1..])
+                    .status()
+                    .is_ok_and(|s| s.success());
+                assert!(ok, "wtype {:?} failed", &words[1..]);
+            }
+            Some("hold") => holds.push(
+                std::process::Command::new("wtype")
+                    .args(["-M", words[1], "-s", words[2], "-m", words[1]])
+                    .spawn()
+                    .expect("run wtype"),
+            ),
+            Some(other) => panic!("unknown script command {other:?}"),
+        }
+    }
+    for mut h in holds {
+        let _ = h.wait();
+    }
+    pointer.destroy();
+    let _ = queue.roundtrip(&mut State);
+}
+
+pub fn run(secs: f64, hz: f64, strokes: bool) {
+    let (conn, mut queue, pointer) = connect();
     let (cx, cy, radius) = (EXTENT.0 as f64 / 2.0, EXTENT.1 as f64 / 2.0, 300.0);
     let start = Instant::now();
     let mut sent = 0u64;

@@ -11,17 +11,19 @@ pub mod hit;
 pub mod input;
 pub mod scene;
 pub mod schedule;
+pub mod select;
+pub mod shape;
 pub mod tools;
 
-pub use actions::{Action, Shortcut};
+pub use actions::{Action, Key, Shortcut};
 pub use animation::ViewAnimation;
 pub use command::{Command, CommandError, History, Session};
 pub use document::{Document, Segment};
 pub use element::{
     Element, ElementId, ElementKind, RecognizedShape, Shape, ShapeKind, ShapeType, Stroke,
 };
-pub use input::Smoother;
-pub use kurbo::Rect;
+pub use input::{Predictor, Smoother};
+pub use kurbo::{self, Rect};
 pub use schedule::FrameScheduler;
 pub use tools::{Tool, Tools};
 

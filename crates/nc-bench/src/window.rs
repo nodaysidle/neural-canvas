@@ -5,10 +5,13 @@
 
 use glam::Vec2;
 use nc_bench::stats::Summary;
-use nc_core::{Command, Document, Element, FrameScheduler, Stroke, Viewport, scene};
-use nc_render::{LiveStroke, Renderer};
+use nc_core::kurbo::Affine;
+use nc_core::{
+    Command, Document, Element, ElementId, FrameScheduler, Session, Stroke, Viewport, scene, select,
+};
+use nc_render::{Lifted, LiveStroke, Renderer, Scene};
 use nc_wayland::{Presented, SideChannel, mono_ns};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -22,6 +25,9 @@ pub enum Scenario {
     PanZoom,
     /// Fixed view, a 1 kHz synthetic pen appending to a live stroke on top of S2k.
     Draw,
+    /// All of S2k on screen; 500 selected strokes move along a circle, one move edit per frame, through
+    /// the same undoable gesture the select tool uses.
+    Move,
     /// Event-driven like the app: a live stroke follows the real pointer over S2k at 100 %. Measures
     /// each motion event's compositor timestamp to the scanout of the first frame that includes it.
     Input,
@@ -85,6 +91,32 @@ struct Bench {
     /// Receipt time minus compositor timestamp, ms: checks both clocks are CLOCK_MONOTONIC.
     motion_delivery_ms: Vec<f64>,
     tablet: (usize, Vec<nc_wayland::ToolFrame>),
+    /// Move scenario: the session holding the document, and the selection's state at the press.
+    moving: Option<Moving>,
+    /// Move scenario: ms per frame spent building and applying the move edit (nc-core only).
+    edit_ms: Vec<f64>,
+    /// ms per recorded frame in `Renderer::render` (sync + upload + encode) and in `queue.submit`.
+    render_ms: Vec<(f64, f64)>,
+    /// Input scenario: every pointer sample as (seconds since start, logical px), for the prediction
+    /// check.
+    pointer_track: Vec<(f64, Vec2)>,
+}
+
+/// Strokes selected by the Move scenario.
+const MOVED: usize = 500;
+/// The Move scenario releases and presses again this often, committing the move as one undo step.
+const MOVE_COMMIT_SECS: f64 = 2.0;
+
+/// The Move scenario's selection, as the app holds it during a select-tool drag.
+struct Moving {
+    session: Session,
+    ids: HashSet<ElementId>,
+    /// The selection at the press.
+    originals: Vec<Arc<Element>>,
+    /// Pointer offset at the press, and where the selection is drawn now.
+    press: Vec2,
+    transform: Affine,
+    commits: u32,
 }
 
 pub fn run(cfg: Config) {
@@ -108,7 +140,31 @@ pub fn run(cfg: Config) {
         motion_frames: Vec::new(),
         motion_delivery_ms: Vec::new(),
         tablet: (0, Vec::new()),
+        moving: None,
+        edit_ms: Vec::new(),
+        render_ms: Vec::new(),
+        pointer_track: Vec::new(),
     };
+    if bench.cfg.scenario == Scenario::Move {
+        let doc = std::mem::take(&mut bench.doc);
+        // Every fourth stroke, so the moved ones are spread through z-order and across the scene.
+        let ids: Vec<ElementId> = doc
+            .elements()
+            .iter()
+            .step_by(4)
+            .take(MOVED)
+            .map(|e| e.id)
+            .collect();
+        let originals = select::selected(&doc, &ids);
+        bench.moving = Some(Moving {
+            session: Session::new(ElementId::nil(), doc),
+            ids: ids.into_iter().collect(),
+            originals,
+            press: Vec2::ZERO,
+            transform: Affine::IDENTITY,
+            commits: 0,
+        });
+    }
     event_loop.run_app(&mut bench).expect("run app");
 }
 
@@ -171,7 +227,10 @@ impl Gpu {
 
 impl Bench {
     fn continuous(&self) -> bool {
-        matches!(self.cfg.scenario, Scenario::PanZoom | Scenario::Draw)
+        matches!(
+            self.cfg.scenario,
+            Scenario::PanZoom | Scenario::Draw | Scenario::Move
+        )
     }
 
     fn script(&mut self, t: f64, size: Vec2) {
@@ -210,6 +269,36 @@ impl Bench {
                     self.pen_samples += 1;
                 }
             }
+            Scenario::Move => {
+                let m = self.moving.as_mut().expect("set up in run");
+                self.viewport = Viewport::fit(
+                    nc_core::Rect::new(
+                        0.0,
+                        0.0,
+                        scene::S2K_EXTENT.x as f64,
+                        scene::S2K_EXTENT.y as f64,
+                    ),
+                    size,
+                    0.0,
+                );
+                let t0 = Instant::now();
+                let angle = (t / 2.0 * std::f64::consts::TAU) as f32;
+                let pointer = Vec2::new(angle.cos(), angle.sin()) * 300.0;
+                let commits = (t / MOVE_COMMIT_SECS) as u32;
+                if commits > m.commits {
+                    // Release: one edit for the whole drag. Press again where the pointer is now.
+                    m.commits = commits;
+                    m.session
+                        .execute("Move", select::transformed(&m.originals, m.transform))
+                        .expect("moving existing strokes applies");
+                    let ids: Vec<ElementId> = m.ids.iter().copied().collect();
+                    m.originals = select::selected(m.session.doc(), &ids);
+                    m.press = pointer;
+                }
+                let d = pointer - m.press;
+                m.transform = Affine::translate((d.x as f64, d.y as f64));
+                self.edit_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+            }
             Scenario::Input => {
                 self.viewport = Viewport {
                     scale: 1.0,
@@ -242,7 +331,8 @@ impl Bench {
                 },
             ) = (frames.get(id as usize), p)
             {
-                scheduler.on_presented(f.start_ns, at_ns, refresh_ns, f.on_schedule);
+                let work = (f.cpu_ms * 1e6) as u64;
+                scheduler.on_presented(f.start_ns, at_ns, refresh_ns, f.on_schedule, work);
             }
         });
         let now_ms = mono_ns() / 1_000_000;
@@ -309,6 +399,26 @@ impl Bench {
             println!("cpu per frame (script + acquire + encode + submit + present): {c}");
             println!("  of which swapchain acquire wait:                          {a}");
         }
+        if let Some(m) = &self.moving {
+            if let Some(e) = Summary::of(&self.edit_ms) {
+                println!("  of which select-tool work (nc-core):                      {e}");
+            }
+            let stats = gpu.renderer.stats();
+            println!(
+                "move: {MOVED} strokes, {} commits; last frame uploaded {} segments; arena rebuilds {}, holes {}; undo: {:?}",
+                m.commits,
+                stats.edited_uploaded,
+                stats.rebuilds,
+                stats.holes,
+                m.session.history().undo_label()
+            );
+        }
+        let render: Vec<f64> = self.render_ms.iter().map(|r| r.0).collect();
+        let submit: Vec<f64> = self.render_ms.iter().map(|r| r.1).collect();
+        if let (Some(r), Some(s)) = (Summary::of(&render), Summary::of(&submit)) {
+            println!("  of which Renderer::render (sync, upload, encode):          {r}");
+            println!("  of which queue.submit:                                     {s}");
+        }
         if self.cfg.latch == Latch::Adaptive {
             println!(
                 "adaptive latch phase at the end: {:.2} ms after vblank",
@@ -343,6 +453,7 @@ impl Bench {
                 Some(s) => println!("pointer motion event → scanout of its first frame: {s}"),
                 None => println!("no pointer motion recorded: move the pointer over the window"),
             }
+            print_prediction(&self.pointer_track);
         }
     }
 }
@@ -406,6 +517,9 @@ impl ApplicationHandler for Bench {
                 };
                 if self.cfg.scenario == Scenario::Input {
                     let p = Vec2::new((position.x / scale) as f32, (position.y / scale) as f32);
+                    if let Some(start) = self.started {
+                        self.pointer_track.push((start.elapsed().as_secs_f64(), p));
+                    }
                     let world = self.viewport.screen_to_world(p);
                     match &mut self.live {
                         Some(s) if s.points.len() < 2_000 => {
@@ -536,23 +650,78 @@ impl Bench {
             serial: self.live_serial,
             stroke,
         });
+        let doc = self.moving.as_ref().map_or(&self.doc, |m| m.session.doc());
+        let lifted = self.moving.as_ref().map(|m| Lifted {
+            ids: &m.ids,
+            transform: m.transform,
+        });
+        let t_render = Instant::now();
         g.renderer.render(
             &g.device,
             &g.queue,
             &mut encoder,
             &view,
-            &self.doc,
-            live,
+            &Scene {
+                live,
+                lifted,
+                ..Scene::doc(doc)
+            },
             &self.viewport,
             size.to_array(),
             scale,
         );
+        let t_submit = Instant::now();
         g.queue.submit([encoder.finish()]);
+        if feedback.is_some() {
+            self.render_ms.push((
+                (t_submit - t_render).as_secs_f64() * 1e3,
+                t_submit.elapsed().as_secs_f64() * 1e3,
+            ));
+        }
         if let (Some(i), Some(wl)) = (feedback, &self.wl) {
             wl.request_feedback(i);
         }
         g.window.pre_present_notify();
         g.queue.present(frame);
         acquire_ms
+    }
+}
+
+/// Replays the recorded pointer through the app's ink predictor: how far the drawn tip is from where the
+/// pointer really is one refresh later, with prediction and without (the plain lag of the last sample).
+fn print_prediction(track: &[(f64, Vec2)]) {
+    const HORIZON: f64 = 1.0 / 120.0;
+    let at = |t: f64| -> Option<Vec2> {
+        let i = track.partition_point(|(s, _)| *s < t);
+        let ((t0, p0), (t1, p1)) = (*track.get(i.checked_sub(1)?)?, *track.get(i)?);
+        Some(p0.lerp(p1, ((t - t0) / (t1 - t0).max(1e-9)) as f32))
+    };
+    let mut predictor = nc_core::Predictor::default();
+    let (mut with, mut without) = (Vec::new(), Vec::new());
+    for &(t, p) in track {
+        predictor.push(t, p);
+        // Only while moving: a still pointer has nothing to predict.
+        if let (Some(ahead), Some(truth)) = (predictor.predict(t, HORIZON), at(t + HORIZON))
+            && truth.distance(p) > 1.0
+        {
+            with.push(ahead.distance(truth) as f64);
+            without.push(p.distance(truth) as f64);
+        }
+    }
+    let px = |s: Summary| {
+        format!(
+            "n={} p50={:.2} p95={:.2} p99={:.2} max={:.2} px",
+            s.n, s.p50, s.p95, s.p99, s.max
+        )
+    };
+    if let (Some(w), Some(wo)) = (Summary::of(&with), Summary::of(&without)) {
+        println!(
+            "ink tip vs pointer one refresh later: predicted   {}",
+            px(w)
+        );
+        println!(
+            "                                      last sample {}",
+            px(wo)
+        );
     }
 }

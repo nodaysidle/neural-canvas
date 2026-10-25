@@ -156,6 +156,9 @@ My recommendation is predicted ink: extrapolate the live tail about one refresh 
 APIs do. It shortens what the eye sees without touching the measured event path, and it should be
 measured with this same harness.
 
+**Decision (2026-10-25, after review):** predicted ink was adopted and shipped in Phase 3. The figures
+above remain the raw, unpredicted baseline; `phase-3.md` has the predicted-tip measurement.
+
 ### Frame pacing with the scheduler (S2k, fullscreen, Fifo, 30 s)
 
 | Run | Frames/s | CPU p50 / p99 | Scanout interval p99 / max | > 8.33 ms | > 16.6 ms | Discarded |

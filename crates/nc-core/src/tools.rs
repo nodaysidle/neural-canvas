@@ -1,12 +1,16 @@
 //! Which tool a press uses. Holding Space and turning the stylus to its eraser end are temporary: they
 //! never overwrite the chosen tool, so releasing restores it (Mac bug #13).
 
+use crate::element::ShapeKind;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
     #[default]
     Pen,
     Eraser,
     Hand,
+    Select,
+    Shape(ShapeKind),
 }
 
 impl Tool {
@@ -16,6 +20,10 @@ impl Tool {
             'p' => Some(Self::Pen),
             'e' => Some(Self::Eraser),
             'h' => Some(Self::Hand),
+            'v' => Some(Self::Select),
+            'r' => Some(Self::Shape(ShapeKind::Rectangle)),
+            'o' => Some(Self::Shape(ShapeKind::Ellipse)),
+            'l' => Some(Self::Shape(ShapeKind::Line)),
             _ => None,
         }
     }
@@ -102,6 +110,10 @@ mod tests {
         assert_eq!(Tool::for_key('p'), Some(Tool::Pen));
         assert_eq!(Tool::for_key('e'), Some(Tool::Eraser));
         assert_eq!(Tool::for_key('h'), Some(Tool::Hand));
+        assert_eq!(Tool::for_key('v'), Some(Tool::Select));
+        assert_eq!(Tool::for_key('r'), Some(Tool::Shape(ShapeKind::Rectangle)));
+        assert_eq!(Tool::for_key('o'), Some(Tool::Shape(ShapeKind::Ellipse)));
+        assert_eq!(Tool::for_key('l'), Some(Tool::Shape(ShapeKind::Line)));
         assert_eq!(Tool::for_key('x'), None);
     }
 }

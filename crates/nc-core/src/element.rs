@@ -1,8 +1,9 @@
 //! Everything a sketch is made of. Every element has a stable id that survives undo, redo and reload.
 
 use glam::Vec2;
-use kurbo::Rect;
+use kurbo::{Affine, Point, Rect};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use uuid::Uuid;
 
 pub type ElementId = Uuid;
@@ -42,7 +43,50 @@ impl Element {
             ElementKind::Recognized(r) => Some(rect(r.min, r.max)),
         }
     }
+
+    /// The element's ink as a stroke: borrowed for strokes, traced for shapes. `None` for elements that
+    /// draw no ink of their own (recognised shapes are an overlay).
+    pub fn ink(&self) -> Option<Cow<'_, Stroke>> {
+        match &self.kind {
+            ElementKind::Stroke(s) => Some(Cow::Borrowed(s)),
+            ElementKind::Shape(s) => Some(Cow::Owned(s.to_stroke())),
+            ElementKind::Recognized(_) => None,
+        }
+    }
+
+    /// The same element (same id) with its geometry mapped through `t`. Line widths are kept.
+    pub fn transformed(&self, t: Affine) -> Self {
+        let map = |p: Vec2| {
+            let q = t * Point::new(p.x as f64, p.y as f64);
+            Vec2::new(q.x as f32, q.y as f32)
+        };
+        let kind = match &self.kind {
+            ElementKind::Stroke(s) => ElementKind::Stroke(Stroke {
+                points: s.points.iter().map(|p| map(*p)).collect(),
+                ..s.clone()
+            }),
+            ElementKind::Shape(s) => ElementKind::Shape(Shape {
+                from: map(s.from),
+                to: map(s.to),
+                ..s.clone()
+            }),
+            ElementKind::Recognized(r) => {
+                let (a, b) = (map(r.min), map(r.max));
+                ElementKind::Recognized(RecognizedShape {
+                    min: a.min(b),
+                    max: a.max(b),
+                    ..r.clone()
+                })
+            }
+        };
+        Self { id: self.id, kind }
+    }
 }
+
+/// Flattening tolerance for ellipses, in world units.
+// shortcut: fixed tolerance, facets show above ~16x zoom on large ellipses; flatten per zoom level if
+// that is noticed.
+const ELLIPSE_TOLERANCE: f64 = 0.05;
 
 fn rect(a: Vec2, b: Vec2) -> Rect {
     Rect::from_points((a.x as f64, a.y as f64), (b.x as f64, b.y as f64))
@@ -138,6 +182,53 @@ pub struct Shape {
     pub color: [f32; 4],
 }
 
+impl Shape {
+    /// The ink path: a closed outline for rectangles and ellipses, the two endpoints for a line.
+    pub fn points(&self) -> Vec<Vec2> {
+        let r = rect(self.from, self.to);
+        match self.kind {
+            ShapeKind::Line => vec![self.from, self.to],
+            ShapeKind::Rectangle => [
+                (r.x0, r.y0),
+                (r.x1, r.y0),
+                (r.x1, r.y1),
+                (r.x0, r.y1),
+                (r.x0, r.y0),
+            ]
+            .iter()
+            .map(|&(x, y)| Vec2::new(x as f32, y as f32))
+            .collect(),
+            ShapeKind::Ellipse => {
+                let mut out = Vec::new();
+                kurbo::flatten(
+                    kurbo::Shape::path_elements(&kurbo::Ellipse::from_rect(r), ELLIPSE_TOLERANCE),
+                    ELLIPSE_TOLERANCE,
+                    |el| match el {
+                        kurbo::PathEl::MoveTo(p) | kurbo::PathEl::LineTo(p) => {
+                            out.push(Vec2::new(p.x as f32, p.y as f32))
+                        }
+                        _ => {}
+                    },
+                );
+                if let Some(&first) = out.first() {
+                    out.push(first);
+                }
+                out
+            }
+        }
+    }
+
+    /// The shape as constant-width ink; duplicate points (a zero-size drag) collapse to a dot.
+    pub fn to_stroke(&self) -> Stroke {
+        let points = self.points();
+        let mut stroke = Stroke::new(points[0], self.width, self.color);
+        for p in &points[1..] {
+            stroke.push(*p);
+        }
+        stroke
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShapeKind {
     Rectangle,
@@ -205,6 +296,46 @@ mod tests {
             "mouse strokes stay constant width"
         );
         assert_eq!(mouse.half_width(0), 5.0);
+    }
+
+    #[test]
+    fn shapes_trace_their_outline() {
+        let shape = |kind| Shape {
+            kind,
+            from: Vec2::new(10.0, 20.0),
+            to: Vec2::new(30.0, 0.0),
+            width: 2.0,
+            color: [1.0; 4],
+        };
+        let rect = shape(ShapeKind::Rectangle).points();
+        assert_eq!(rect.len(), 5);
+        assert_eq!(rect.first(), rect.last(), "closed");
+        assert_eq!(rect[0], Vec2::new(10.0, 0.0), "normalised to top-left");
+        assert_eq!(
+            shape(ShapeKind::Line).points(),
+            [Vec2::new(10.0, 20.0), Vec2::new(30.0, 0.0)]
+        );
+        let ellipse = shape(ShapeKind::Ellipse).points();
+        assert!(ellipse.len() > 8);
+        let centre = Vec2::new(20.0, 10.0);
+        for p in &ellipse {
+            let q = (*p - centre) / 10.0;
+            assert!((q.length() - 1.0).abs() < 0.01, "{p} is on the circle");
+        }
+    }
+
+    #[test]
+    fn transform_keeps_id_and_width() {
+        let mut s = Stroke::new(Vec2::ZERO, 3.0, [1.0; 4]);
+        s.push(Vec2::new(10.0, 0.0));
+        let e = Element::stroke(s);
+        let moved = e.transformed(Affine::translate((5.0, 7.0)));
+        assert_eq!(moved.id, e.id);
+        let ElementKind::Stroke(m) = &moved.kind else {
+            panic!()
+        };
+        assert_eq!(m.points, [Vec2::new(5.0, 7.0), Vec2::new(15.0, 7.0)]);
+        assert_eq!(m.width, 3.0);
     }
 
     #[test]

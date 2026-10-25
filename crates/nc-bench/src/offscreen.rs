@@ -3,7 +3,7 @@
 use glam::Vec2;
 use nc_bench::stats::Summary;
 use nc_core::{Viewport, scene};
-use nc_render::Renderer;
+use nc_render::{Renderer, Scene};
 use std::time::Instant;
 
 const W: u32 = 2560;
@@ -96,8 +96,7 @@ pub fn run(stroke_counts: &[usize], frames: usize) {
                     &queue,
                     &mut enc,
                     &view,
-                    &doc,
-                    None,
+                    &Scene::doc(&doc),
                     &viewport,
                     size.to_array(),
                     1.0,

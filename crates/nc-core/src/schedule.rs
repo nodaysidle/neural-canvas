@@ -13,6 +13,9 @@ const STREAK: u32 = 60;
 const REPROBE: u32 = 3_600;
 /// Late by at most this much and we still draw now rather than waiting a refresh.
 const SLACK_NS: u64 = 500_000;
+/// A frame whose own work took this much longer than usual (one-off work like committing a 500-stroke
+/// move) says nothing about the phase: it is left out of tuning either way.
+const HEAVY_EXTRA_NS: u64 = 1_000_000;
 
 #[derive(Clone, Debug, Default)]
 pub struct FrameScheduler {
@@ -25,6 +28,8 @@ pub struct FrameScheduler {
     depth: Option<u64>,
     streak: u32,
     since_miss: u32,
+    /// Running average of per-frame work (sample to submit), ns.
+    typical_work: Option<u64>,
 }
 
 impl FrameScheduler {
@@ -48,13 +53,26 @@ impl FrameScheduler {
         }
     }
 
-    /// Feedback for a frame sampled at `sample` and shown at `presented`. `on_schedule` says it was
-    /// drawn at the time `draw_at` asked for; only those frames tune the phase.
-    pub fn on_presented(&mut self, sample: u64, presented: u64, refresh: u64, on_schedule: bool) {
+    /// Feedback for a frame sampled at `sample`, whose drawing took `work` ns, shown at `presented`.
+    /// `on_schedule` says it was drawn at the time `draw_at` asked for; only those frames, and only
+    /// ones with typical work, tune the phase.
+    pub fn on_presented(
+        &mut self,
+        sample: u64,
+        presented: u64,
+        refresh: u64,
+        on_schedule: bool,
+        work: u64,
+    ) {
         if refresh == 0 {
             return;
         }
         self.grid = Some((presented, refresh));
+        let typical = *self.typical_work.get_or_insert(work);
+        if work > typical * 2 + HEAVY_EXTRA_NS {
+            return;
+        }
+        self.typical_work = Some((typical * 15 + work) / 16);
         if !on_schedule || presented < sample {
             return;
         }
@@ -96,10 +114,20 @@ mod tests {
     /// A compositor that takes a frame committed by `latch` after a vblank and shows it two refreshes
     /// after that vblank (what Phase 0 measured on Hyprland); later commits slip one refresh.
     fn run(latch: u64, render: u64, frames: usize) -> (FrameScheduler, Vec<bool>) {
+        run_with(latch, |_| render, frames)
+    }
+
+    /// Like [`run`], with each frame's render time from `render(frame index)`.
+    fn run_with(
+        latch: u64,
+        render: impl Fn(usize) -> u64,
+        frames: usize,
+    ) -> (FrameScheduler, Vec<bool>) {
         let mut s = FrameScheduler::default();
         let mut now = 1_000_000_000u64;
         let mut misses = Vec::new();
-        for _ in 0..frames {
+        for i in 0..frames {
+            let render = render(i);
             let wanted = now;
             let (sample, on_schedule) = match s.draw_at(wanted) {
                 Some(t) => (t, true),
@@ -110,7 +138,7 @@ mod tests {
             let hit = commit - vblank <= latch;
             let presented = vblank + if hit { 2 } else { 3 } * R;
             misses.push(!hit);
-            s.on_presented(sample, presented, R, on_schedule);
+            s.on_presented(sample, presented, R, on_schedule, render);
             now = vblank + R; // next frame wanted right at the next vblank, like a frame callback
         }
         (s, misses)
@@ -127,6 +155,27 @@ mod tests {
         );
         let late = misses[5_000..].iter().filter(|m| **m).count();
         assert!(late <= 5, "{late} misses in 15,000 settled frames");
+    }
+
+    /// A 5 ms frame every 2 s (committing a big move) misses its refresh, but must not drag the phase
+    /// down: the ordinary frames around it are still on time at the learnt phase.
+    #[test]
+    fn heavy_one_off_frames_do_not_teach_the_phase() {
+        let latch = 4_000_000;
+        let (s, misses) = run_with(
+            latch,
+            |i| if i % 240 == 0 { 5_000_000 } else { 500_000 },
+            20_000,
+        );
+        let phase = s.phase_ns();
+        assert!(
+            phase + 2_000_000 >= latch,
+            "phase {phase} ns kept near the latch"
+        );
+        let late = (5_000..20_000)
+            .filter(|i| misses[*i] && i % 240 != 0)
+            .count();
+        assert!(late <= 5, "{late} ordinary frames late");
     }
 
     #[test]

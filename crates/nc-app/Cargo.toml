@@ -21,3 +21,5 @@ signal-hook = "0.4"
 dirs = "7"
 mundy = { version = "0.2", default-features = false, features = ["callback", "reduced-motion", "async-io"] }
 nc-wayland.workspace = true
+nc-export.workspace = true
+wl-clipboard-rs = "0.9"

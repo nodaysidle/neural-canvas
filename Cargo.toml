@@ -4,6 +4,7 @@ members = [
     "crates/nc-core",
     "crates/nc-render",
     "crates/nc-store",
+    "crates/nc-export",
     "crates/nc-wayland",
     "crates/nc-app",
     "crates/nc-bench",
@@ -20,6 +21,7 @@ rust-version = "1.89"
 nc-core = { path = "crates/nc-core" }
 nc-render = { path = "crates/nc-render" }
 nc-store = { path = "crates/nc-store" }
+nc-export = { path = "crates/nc-export" }
 nc-wayland = { path = "crates/nc-wayland" }
 glam = { version = "0.34", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1", features = ["derive"] }
