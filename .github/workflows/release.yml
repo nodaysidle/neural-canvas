@@ -1,0 +1,51 @@
+# Drafts the GitHub Release for a pushed tag vX.Y.Z (docs/RELEASING.md step 7): builds the three
+# artefacts with packaging/release.sh, then attaches them and their .sha256 files to a draft release.
+# Never publishes: a human reviews the draft and publishes it.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: ubuntu-24.04
+    env:
+      # The toolchain v0.1.0 was built with (docs/reports/phase-7.md); release.sh passes it to the
+      # ubuntu:24.04 build container.
+      RUST_TOOLCHAIN: 1.98.1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # release.sh stamps the archives with the last commit that changed what ships.
+          fetch-depth: 0
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install --profile minimal "$RUST_TOOLCHAIN"
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Tag matches Cargo.toml
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          test "$GITHUB_REF_NAME" = "v$ver" || { echo "tag $GITHUB_REF_NAME, Cargo.toml $ver" >&2; exit 1; }
+          echo "VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Build artefacts
+        run: packaging/release.sh
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The version's section of CHANGELOG.md, without its heading.
+          awk -v h="## $GITHUB_REF_NAME " 'index($0, h) == 1 { on = 1; next } /^## / { on = 0 } on' \
+            CHANGELOG.md > notes.md
+          cd dist
+          sha256sum -c ./*.sha256
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "NeuralCanvas $VERSION" --notes-file ../notes.md \
+            ./*.AppImage ./*.tar.zst ./*.tar.gz ./*.sha256
