@@ -8,6 +8,17 @@
 # Needs Hyprland on a 2560x1440 output (the virtual pointer maps onto it), no other output, the
 # release nc-bench (`cargo build --release -p nc-bench`), sqlite3, grim, wl-clipboard. Usage:
 #   packaging/smoke.sh <neuralcanvas binary or AppImage> <output folder>
+#
+# Where it clicks and draws, in logical px from the window's top-left corner. The defaults fit the
+# window filling that output with the inspector at its default width; set these to run elsewhere:
+#   SMOKE_NEW_PROJECT="216 66"            "New project" in the sidebar
+#   SMOKE_PEN_START="1200 700"            pointer rests here on the canvas while the pen is chosen
+#   SMOKE_CARD="787 362 1387 862"         rectangles drawn, as left top right bottom
+#   SMOKE_FIELD="837 602 1337 662"
+#   SMOKE_BUTTON="837 742 1037 802"
+#   SMOKE_APPLY="236 320"                 inspector's Apply; x is counted from the window's right edge
+#   SMOKE_SAVE_PRESET="210 320"           inspector's Save as preset; x from the right edge too
+# e.g. SMOKE_APPLY="200 320" packaging/smoke.sh target/release/neuralcanvas /tmp/smoke
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
@@ -23,6 +34,22 @@ echo "XDG_PICTURES_DIR=\"$pictures\"" > "$config/user-dirs.dirs"
 db=$data/neuralcanvas/neuralcanvas.db
 step() { echo "== $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# coords <array> <env var> <default>: the variable's whole numbers (or the default's) into the array.
+coords() {
+    local -n into=$1
+    local value=${!2:-$3} want
+    read -ra into <<< "$value"
+    want=$(wc -w <<< "$3")
+    [[ $value =~ ^\ *[0-9]+(\ +[0-9]+)*\ *$ && ${#into[@]} -eq $want ]] ||
+        fail "$2 must be $want whole numbers like \"$3\", got \"$value\""
+}
+coords new_project SMOKE_NEW_PROJECT "216 66"
+coords pen_start SMOKE_PEN_START "1200 700"
+coords card SMOKE_CARD "787 362 1387 862"
+coords field SMOKE_FIELD "837 602 1337 662"
+coords button SMOKE_BUTTON "837 742 1037 802"
+coords apply SMOKE_APPLY "236 320"
+coords save_preset SMOKE_SAVE_PRESET "210 320"
 drive() { "$drive" drive script; }
 
 launch() {
@@ -60,7 +87,7 @@ shot 01-first-launch
 
 step "new project"
 printf 'key -M ctrl b -m ctrl\nwait 400\n' | drive
-click 216 66 1200
+click "${new_project[@]}" 1200
 printf 'key -M ctrl b -m ctrl\nwait 300\n' | drive
 
 step "draw a card, a field and a button"
@@ -68,10 +95,10 @@ rect() { printf 'move %d %d 80\ndown\nmove %d %d 300\nmove %d %d 200\nmove %d %d
     "$((wx + $1))" "$((wy + $2))" "$((wx + $3))" "$((wy + $2))" "$((wx + $3))" "$((wy + $4))" \
     "$((wx + $1))" "$((wy + $4))" "$((wx + $1))" "$((wy + $2 + 2))"; }
 {
-    printf 'move %d %d 100\nkey p\n' "$((wx + 1200))" "$((wy + 700))"
-    rect 787 362 1387 862
-    rect 837 602 1337 662
-    rect 837 742 1037 802
+    printf 'move %d %d 100\nkey p\n' "$((wx + pen_start[0]))" "$((wy + pen_start[1]))"
+    rect "${card[@]}"
+    rect "${field[@]}"
+    rect "${button[@]}"
     printf 'key w\nwait 300\nkey w\nwait 800\n' # sketch -> hybrid -> wireframe
 } | drive
 shot 02-drawn-wireframe
@@ -88,8 +115,8 @@ printf 'key -M ctrl i -m ctrl\nwait 400\n' | drive
 printf 'key -M ctrl v -m ctrl\nwait 3000\n' | drive
 if [ -f "$saved" ]; then wl-copy < "$saved" >/dev/null 2>&1; else wl-copy --clear; fi
 shot 03-style-read
-click $((ww - 236)) 320 800 # Apply
-click $((ww - 210)) 320 800 # Save as preset
+click $((ww - apply[0])) "${apply[1]}" 800 # Apply
+click $((ww - save_preset[0])) "${save_preset[1]}" 800 # Save as preset
 shot 04-style-applied
 
 step "export sketch and wireframe"

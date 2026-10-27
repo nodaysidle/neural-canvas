@@ -35,16 +35,14 @@ Optional, recommended: a minisign `.minisig` per artefact with the public key in
    into a clean archlinux container and started against the host's Wayland session.
 6. Scripted flow on clean Arch + one non-Arch system: `packaging/smoke.sh <binary or AppImage> <dir>`
    (fresh data folder: new project, draw, style from a screenshot, export, close, relaunch, store
-   unchanged). Run the AppImage on Arch and on Ubuntu or Fedora.
-7. `CHANGELOG.md` gets the version's notes (`## vX.Y.Z (date): …`) and the artefacts' checksums; it is
-   left out of the source tarball (like the PKGBUILDs and reports), so writing it changes no artefact.
-   Tag that commit `vX.Y.Z` (the tag must equal `Cargo.toml`'s version).
-8. Pushing the tag runs release CI (`.github/workflows/release.yml`, ubuntu-24.04, Rust 1.98.1): it
-   runs `packaging/release.sh` (without makepkg, so no `.SRCINFO`), checks `sha256sum -c`, and creates
-   a **draft** GitHub Release titled `NeuralCanvas X.Y.Z` with the version's `CHANGELOG.md` section as
-   notes and the three artefacts **and** their `.sha256` files attached. It never publishes and fails if
-   a release for the tag already exists. A human compares the draft's checksums with `CHANGELOG.md`
-   and publishes.
+   unchanged). Run the AppImage on Arch and on Ubuntu or Fedora. Its click and draw positions
+   default to the window filling a 2560×1440 output with the inspector at its default width; on
+   another layout set `SMOKE_NEW_PROJECT`, `SMOKE_PEN_START`, `SMOKE_CARD`, `SMOKE_FIELD`,
+   `SMOKE_BUTTON`, `SMOKE_APPLY` and `SMOKE_SAVE_PRESET` (listed with their defaults in the
+   script's header).
+7. Draft GitHub Release with artefacts **and** their `.sha256` files. A human publishes.
+8. `CHANGELOG.md` gets the version's notes and the artefacts' checksums; it is left out of the source
+   tarball (like the PKGBUILDs and reports), so writing it changes no artefact. Tag that commit.
 9. AUR `pkgver` / `sha256sums` bumped from the published artefacts (`dist/aur/`). Pushing to the AUR
    is outward-facing: ask Alan first.
 
