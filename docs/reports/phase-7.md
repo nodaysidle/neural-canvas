@@ -114,8 +114,14 @@ artefacts.
   it), the inspector at its default width. On other machines it needs its coordinates adjusted
   (since made configurable: the `SMOKE_*` variables in the script's header).
 - **X11 was not tried.** The packages list libx11, libxcursor and libxi as optional for X11 sessions.
-- **Not tried on real hardware other than this machine:** the Ubuntu and Fedora runs use this
-  machine's Intel GPU through containers.
+  Checked 2026-10-25 without touching the screen: the only X server is Hyprland's Xwayland on `:0`,
+  whose windows land on the live desktop; Xvfb, Weston, Sway and cage are not installed, there is no
+  X session in `/usr/share/xsessions`, and the app has no headless mode (it always opens a winit
+  window). A headless X11 run needs one of those installed, or a run on a real X session.
+- **No non-Intel GPU was tried.** `lspci` shows one display controller (Intel Meteor Lake-P Arc,
+  `8086:7d55`); the only Vulkan ICDs are `intel_icd.json` and `intel_hasvk_icd.json` (no lavapipe).
+  The Ubuntu and Fedora runs use this machine's Intel GPU through containers. AMD or NVIDIA needs
+  other hardware.
 - **AUR-ready files exist only in `dist/aur/`** (git-ignored); the committed PKGBUILDs carry the same
   checksums. Publishing them is your call.
 - **Release CI** (RELEASING.md: CI drafts the GitHub Release) is not set up: there is no remote.

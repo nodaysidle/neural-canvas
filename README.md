@@ -4,7 +4,7 @@
 
 <h1 align="center">NeuralCanvas for Linux</h1>
 
-![NeuralCanvas: a sketched layout on the canvas, projects in the sidebar, tools on the left](docs/assets/screenshot.png)
+![NeuralCanvas: drawing a login screen with the pen tool, shown in the Wireframe view](docs/assets/hero.gif)
 
 <p align="center">
   <strong>A GPU-accelerated sketch-to-wireframe canvas for Linux (Arch + Wayland/Hyprland).</strong><br>

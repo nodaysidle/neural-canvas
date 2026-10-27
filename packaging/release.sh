@@ -65,8 +65,13 @@ for pkg in neuralcanvas neuralcanvas-bin; do
 done
 cp packaging/arch/PKGBUILD "$dist/aur/neuralcanvas/PKGBUILD"
 cp packaging/arch/PKGBUILD-bin "$dist/aur/neuralcanvas-bin/PKGBUILD"
-for pkg in neuralcanvas neuralcanvas-bin; do
-    (cd "$dist/aur/$pkg" && makepkg --printsrcinfo > .SRCINFO)
-done
+# Release CI (.github/workflows/release.yml) runs on Ubuntu, without makepkg; the AUR copies are local work.
+if command -v makepkg >/dev/null; then
+    for pkg in neuralcanvas neuralcanvas-bin; do
+        (cd "$dist/aur/$pkg" && makepkg --printsrcinfo > .SRCINFO)
+    done
+else
+    echo "release.sh: no makepkg, dist/aur/ has no .SRCINFO" >&2
+fi
 
 ls -l "$dist"
